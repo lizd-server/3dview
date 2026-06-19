@@ -3,149 +3,120 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Voxel Mesh Viewer</title>
+    <title>Voxel Mesh Slice Viewer</title>
   </head>
   <body>
     <div id="app">
-      <aside class="sidebar">
-        <header class="app-title">
-          <div>
-            <h1>Voxel Mesh Viewer</h1>
-            <p id="statusText">Ready</p>
-          </div>
-          <button id="demoButton" type="button">Demo</button>
-        </header>
+      <header class="topbar">
+        <div class="brand-block">
+          <h1>Voxel Mesh Slice Viewer</h1>
+          <p id="statusText">Ready</p>
+        </div>
 
-        <section class="panel">
-          <h2>Data</h2>
-          <label class="file-row">
+        <div class="top-actions">
+          <label class="file-control">
             <span>Volume</span>
             <input id="volumeInput" type="file" accept=".npy,.npz" />
           </label>
-          <label class="control-row hidden" id="arraySelectRow">
-            <span>Array</span>
-            <select id="arraySelect"></select>
-          </label>
-          <label class="file-row">
+          <label class="file-control">
             <span>Mesh</span>
             <input id="meshInput" type="file" accept=".ply,.obj,.stl" />
           </label>
-        </section>
-
-        <section class="panel">
-          <h2>Labels</h2>
-          <label class="control-row">
-            <span>Schema</span>
-            <select id="schemaSelect">
-              <option value="semantic">Pipeline labels</option>
-              <option value="components">CCL components</option>
-              <option value="cases">CCL cases</option>
-            </select>
+          <label class="select-control hidden" id="arraySelectRow">
+            <span>Array</span>
+            <select id="arraySelect"></select>
           </label>
-          <div id="categoryControls" class="category-list"></div>
-        </section>
+          <button id="demoButton" type="button">Demo</button>
 
-        <section class="panel">
-          <h2>Slicing</h2>
-          <div class="segmented" id="sliceAxisGroup">
-            <button type="button" data-axis="none" class="active">All</button>
-            <button type="button" data-axis="x">X</button>
-            <button type="button" data-axis="y">Y</button>
-            <button type="button" data-axis="z">Z</button>
+          <details class="options-panel">
+            <summary>Options</summary>
+            <div class="options-grid">
+              <label class="select-control">
+                <span>Axis order</span>
+                <select id="axisOrderSelect">
+                  <option value="xyz">i,j,k -> x,y,z</option>
+                  <option value="zyx">i,j,k -> z,y,x</option>
+                </select>
+              </label>
+              <div class="check-row">
+                <label><input id="flipX" type="checkbox" /> Flip X</label>
+                <label><input id="flipY" type="checkbox" /> Flip Y</label>
+                <label><input id="flipZ" type="checkbox" /> Flip Z</label>
+              </div>
+              <label class="select-control">
+                <span>Mesh mode</span>
+                <select id="meshModeSelect">
+                  <option value="solid">Solid</option>
+                  <option value="wireframe">Wireframe</option>
+                  <option value="transparent">Transparent</option>
+                  <option value="solidWire">Solid + wire</option>
+                </select>
+              </label>
+              <label class="range-control short-range">
+                <span>Opacity</span>
+                <input id="meshOpacity" type="range" min="0" max="1" step="0.01" value="0.58" />
+                <output id="meshOpacityValue">0.58</output>
+              </label>
+              <label class="checkbox-control">
+                <input id="normalizeMesh" type="checkbox" />
+                Normalize mesh
+              </label>
+              <button id="clearMeshButton" type="button">Clear mesh</button>
+            </div>
+          </details>
+        </div>
+      </header>
+
+      <main class="workspace">
+        <section class="mesh-pane">
+          <div class="pane-heading">
+            <div>
+              <h2>Mesh + slice plane</h2>
+              <span>Drag or scroll the plane</span>
+            </div>
+            <div class="slice-controls">
+              <div class="segmented" id="sliceAxisGroup" aria-label="Slice axis">
+                <button type="button" data-axis="x">X</button>
+                <button type="button" data-axis="y">Y</button>
+                <button type="button" data-axis="z" class="active">Z</button>
+              </div>
+              <label class="range-control slice-range">
+                <span id="sliceLabel">Z slice</span>
+                <input id="sliceSlider" type="range" min="0" max="0" value="0" disabled />
+                <output id="sliceValue">-</output>
+              </label>
+              <button id="resetCameraButton" type="button">Reset</button>
+            </div>
           </div>
-          <label class="slider-row">
-            <span id="sliceLabel">Slice</span>
-            <input id="sliceSlider" type="range" min="0" max="0" value="0" disabled />
-            <output id="sliceValue">-</output>
-          </label>
-          <label class="control-row">
-            <span>Thickness</span>
-            <input id="sliceThickness" type="number" min="1" max="128" value="1" />
-          </label>
+          <canvas id="viewerCanvas"></canvas>
         </section>
 
-        <section class="panel">
-          <h2>Coordinates</h2>
-          <label class="control-row">
-            <span>Axis order</span>
-            <select id="axisOrderSelect">
-              <option value="xyz">i,j,k -> x,y,z</option>
-              <option value="zyx">i,j,k -> z,y,x</option>
-            </select>
-          </label>
-          <div class="check-grid">
-            <label><input id="flipX" type="checkbox" /> Flip X</label>
-            <label><input id="flipY" type="checkbox" /> Flip Y</label>
-            <label><input id="flipZ" type="checkbox" /> Flip Z</label>
+        <section class="slice-pane">
+          <div class="pane-heading">
+            <div>
+              <h2>Slice colors</h2>
+              <span id="renderStats">No volume loaded</span>
+            </div>
+            <label class="select-control schema-control">
+              <span>Schema</span>
+              <select id="schemaSelect">
+                <option value="semantic">Pipeline labels</option>
+                <option value="components">CCL components</option>
+                <option value="cases">CCL cases</option>
+              </select>
+            </label>
           </div>
-        </section>
-
-        <section class="panel">
-          <h2>Voxels</h2>
-          <label class="control-row">
-            <span>Draw mode</span>
-            <select id="renderModeSelect">
-              <option value="boundary">Boundary</option>
-              <option value="sparse">Sparse</option>
-              <option value="all">All capped</option>
-            </select>
-          </label>
-          <label class="control-row">
-            <span>Sample step</span>
-            <input id="sampleStep" type="number" min="1" max="128" value="1" />
-          </label>
-          <label class="control-row">
-            <span>Max voxels</span>
-            <input id="maxVoxels" type="number" min="1000" max="1000000" step="1000" value="160000" />
-          </label>
-          <label class="checkbox-line">
-            <input id="autoSample" type="checkbox" checked />
-            Auto sample large volumes
-          </label>
-        </section>
-
-        <section class="panel">
-          <h2>Mesh</h2>
-          <label class="control-row">
-            <span>Mode</span>
-            <select id="meshModeSelect">
-              <option value="solid">Solid</option>
-              <option value="wireframe">Wireframe</option>
-              <option value="transparent">Transparent</option>
-              <option value="solidWire">Solid + wire</option>
-            </select>
-          </label>
-          <label class="slider-row">
-            <span>Opacity</span>
-            <input id="meshOpacity" type="range" min="0" max="1" step="0.01" value="0.58" />
-            <output id="meshOpacityValue">0.58</output>
-          </label>
-          <label class="checkbox-line">
-            <input id="normalizeMesh" type="checkbox" />
-            Normalize mesh
-          </label>
-          <button id="clearMeshButton" type="button" class="wide-button">Clear mesh</button>
-        </section>
-
-        <section class="panel inspector">
-          <h2>Inspector</h2>
-          <dl id="inspectorList">
-            <dt>Target</dt><dd>-</dd>
+          <div class="slice-canvas-shell">
+            <canvas id="sliceCanvas"></canvas>
+          </div>
+          <div id="legendList" class="legend-list"></div>
+          <dl id="inspectorList" class="inspector-list">
             <dt>Grid</dt><dd>-</dd>
             <dt>World</dt><dd>-</dd>
             <dt>Label</dt><dd>-</dd>
             <dt>Category</dt><dd>-</dd>
           </dl>
         </section>
-      </aside>
-
-      <main class="viewport-shell">
-        <div class="toolbar">
-          <button id="resetCameraButton" type="button">Reset Camera</button>
-          <button id="refreshButton" type="button">Refresh Voxels</button>
-          <span id="renderStats">No volume loaded</span>
-        </div>
-        <canvas id="viewerCanvas"></canvas>
       </main>
     </div>
     <script type="module" src="/src/main.ts"></script>

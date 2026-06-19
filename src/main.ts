@@ -8,35 +8,32 @@ import { STLLoader } from "three/examples/jsm/loaders/STLLoader.js";
 import {
   CATEGORIES,
   CATEGORY_ORDER,
+  CASE_OVERLAY_OFFSET,
+  COMPONENT_OVERLAY_OFFSET,
   categoryDisplayName,
+  classifyLabel,
   type AxisOrder,
   type CategoryKey,
   type LabelSchema,
-  type RenderMode,
-  type RenderSettings,
   type SliceAxis,
   type VolumeData,
-  type WorkerRenderResult,
-  type WorkerResponse,
 } from "./types";
 import { loadVolumeFile } from "./volumeLoader";
 
 type MeshMode = "solid" | "wireframe" | "transparent" | "solidWire";
 
-interface CategoryControlState {
-  visible: boolean;
-  opacity: number;
+interface SliceSample {
+  grid: [number, number, number];
+  worldIndex: [number, number, number];
+  world: THREE.Vector3;
+  label: number;
+  category: CategoryKey | null;
 }
 
-interface VoxelMeshUserData {
-  key: CategoryKey;
-  positions: Float32Array;
-  indices: Uint32Array;
-  labels: Float64Array;
-}
-
-class VoxelMeshViewer {
+class MeshSliceViewer {
   private readonly canvas = getElement<HTMLCanvasElement>("viewerCanvas");
+  private readonly sliceCanvas = getElement<HTMLCanvasElement>("sliceCanvas");
+  private readonly sliceContext = mustGetContext(this.sliceCanvas);
   private readonly statusText = getElement<HTMLElement>("statusText");
   private readonly renderStats = getElement<HTMLElement>("renderStats");
   private readonly volumeInput = getElement<HTMLInputElement>("volumeInput");
@@ -44,15 +41,9 @@ class VoxelMeshViewer {
   private readonly arraySelect = getElement<HTMLSelectElement>("arraySelect");
   private readonly arraySelectRow = getElement<HTMLElement>("arraySelectRow");
   private readonly schemaSelect = getElement<HTMLSelectElement>("schemaSelect");
-  private readonly categoryControls = getElement<HTMLElement>("categoryControls");
-  private readonly renderModeSelect = getElement<HTMLSelectElement>("renderModeSelect");
-  private readonly sampleStep = getElement<HTMLInputElement>("sampleStep");
-  private readonly maxVoxels = getElement<HTMLInputElement>("maxVoxels");
-  private readonly autoSample = getElement<HTMLInputElement>("autoSample");
   private readonly sliceSlider = getElement<HTMLInputElement>("sliceSlider");
   private readonly sliceLabel = getElement<HTMLElement>("sliceLabel");
   private readonly sliceValue = getElement<HTMLOutputElement>("sliceValue");
-  private readonly sliceThickness = getElement<HTMLInputElement>("sliceThickness");
   private readonly axisOrderSelect = getElement<HTMLSelectElement>("axisOrderSelect");
   private readonly flipX = getElement<HTMLInputElement>("flipX");
   private readonly flipY = getElement<HTMLInputElement>("flipY");
@@ -61,6 +52,7 @@ class VoxelMeshViewer {
   private readonly meshOpacity = getElement<HTMLInputElement>("meshOpacity");
   private readonly meshOpacityValue = getElement<HTMLOutputElement>("meshOpacityValue");
   private readonly normalizeMesh = getElement<HTMLInputElement>("normalizeMesh");
+  private readonly legendList = getElement<HTMLElement>("legendList");
   private readonly inspectorList = getElement<HTMLElement>("inspectorList");
 
   private readonly scene = new THREE.Scene();
@@ -69,72 +61,89 @@ class VoxelMeshViewer {
   private readonly controls = new OrbitControls(this.camera, this.canvas);
   private readonly raycaster = new THREE.Raycaster();
   private readonly pointer = new THREE.Vector2();
-  private readonly voxelRoot = new THREE.Group();
   private readonly meshRoot = new THREE.Group();
-  private readonly hoverBox = new THREE.Mesh(
-    new THREE.BoxGeometry(1, 1, 1),
+  private readonly sliceRoot = new THREE.Group();
+  private readonly slicePlane = new THREE.Mesh(
+    new THREE.PlaneGeometry(2, 2),
     new THREE.MeshBasicMaterial({
-      color: 0xffffff,
-      wireframe: true,
+      color: "#f97316",
       transparent: true,
-      opacity: 0.95,
-      depthTest: false,
+      opacity: 0.22,
+      side: THREE.DoubleSide,
+      depthWrite: false,
     }),
   );
-  private readonly worker = new Worker(new URL("./volumeWorker.ts", import.meta.url), { type: "module" });
-  private readonly categoryState: Record<CategoryKey, CategoryControlState> = createCategoryState();
 
   private volumes: VolumeData[] = [];
   private activeVolume: VolumeData | null = null;
-  private sliceAxis: SliceAxis = "none";
-  private requestId = 0;
-  private renderTimer = 0;
-  private lastCellSize: [number, number, number] = [1, 1, 1];
+  private sliceAxis: SliceAxis = "z";
+  private sliceIndex = 0;
+  private draggingSlice = false;
+  private dragStartPointer = new THREE.Vector2();
+  private dragStartIndex = 0;
 
   constructor() {
-    this.scene.background = new THREE.Color("#f4f6f8");
-    this.scene.add(this.voxelRoot, this.meshRoot);
-    this.hoverBox.visible = false;
-    this.hoverBox.renderOrder = 1000;
-    this.scene.add(this.hoverBox);
+    this.scene.background = new THREE.Color("#f3f6fa");
+    this.scene.add(this.meshRoot, this.sliceRoot);
 
     this.addSceneGuides();
+    this.addSlicePlane();
     this.addLighting();
     this.resetCamera();
     this.configureRenderer();
-    this.createCategoryControls();
     this.bindEvents();
-    this.updateSliceControls();
+    this.updateSliceControls(true);
+    this.updateSlicePlane();
     this.updateMeshDisplay();
+    this.renderSlice();
     this.resize();
     this.animate();
   }
 
   private addSceneGuides(): void {
     const bounds = new THREE.Box3(new THREE.Vector3(-1, -1, -1), new THREE.Vector3(1, 1, 1));
-    const helper = new THREE.Box3Helper(bounds, new THREE.Color("#344054"));
+    const helper = new THREE.Box3Helper(bounds, new THREE.Color("#334155"));
     const helperMaterial = helper.material as THREE.LineBasicMaterial;
     helperMaterial.transparent = true;
-    helperMaterial.opacity = 0.32;
+    helperMaterial.opacity = 0.34;
     this.scene.add(helper);
 
     const axes = new THREE.AxesHelper(1.25);
     axes.position.set(-1, -1, -1);
     this.scene.add(axes);
 
-    const grid = new THREE.GridHelper(2, 8, "#8792a2", "#d4dae3");
+    const grid = new THREE.GridHelper(2, 8, "#8fa0b4", "#d6dde8");
     grid.position.y = -1;
     this.scene.add(grid);
+  }
+
+  private addSlicePlane(): void {
+    this.slicePlane.name = "slice-plane";
+    this.slicePlane.renderOrder = 20;
+    this.sliceRoot.add(this.slicePlane);
+
+    const edgeGeometry = new THREE.EdgesGeometry(this.slicePlane.geometry);
+    const edges = new THREE.LineSegments(
+      edgeGeometry,
+      new THREE.LineBasicMaterial({
+        color: "#ea580c",
+        transparent: true,
+        opacity: 0.98,
+        depthTest: true,
+      }),
+    );
+    edges.name = "slice-plane-edge";
+    this.sliceRoot.add(edges);
   }
 
   private addLighting(): void {
     this.scene.add(new THREE.HemisphereLight("#ffffff", "#d1d5db", 2.1));
 
-    const keyLight = new THREE.DirectionalLight("#ffffff", 2.4);
+    const keyLight = new THREE.DirectionalLight("#ffffff", 2.5);
     keyLight.position.set(3, 4, 5);
     this.scene.add(keyLight);
 
-    const fillLight = new THREE.DirectionalLight("#d9f7ff", 0.8);
+    const fillLight = new THREE.DirectionalLight("#d9f7ff", 0.75);
     fillLight.position.set(-4, 2, -3);
     this.scene.add(fillLight);
   }
@@ -145,32 +154,37 @@ class VoxelMeshViewer {
     this.controls.enableDamping = true;
     this.controls.dampingFactor = 0.08;
     this.controls.screenSpacePanning = true;
+    this.sliceContext.imageSmoothingEnabled = false;
   }
 
   private bindEvents(): void {
     window.addEventListener("resize", () => this.resize());
-    this.worker.addEventListener("message", (event: MessageEvent<WorkerResponse>) => this.handleWorkerMessage(event.data));
 
     this.volumeInput.addEventListener("change", () => void this.loadSelectedVolumeFile());
     this.meshInput.addEventListener("change", () => void this.loadSelectedMeshFile());
     this.arraySelect.addEventListener("change", () => this.selectVolume(Number(this.arraySelect.value)));
-    this.schemaSelect.addEventListener("change", () => this.scheduleRender());
-    this.renderModeSelect.addEventListener("change", () => this.scheduleRender());
-    this.sampleStep.addEventListener("change", () => this.scheduleRender());
-    this.maxVoxels.addEventListener("change", () => this.scheduleRender());
-    this.autoSample.addEventListener("change", () => this.scheduleRender());
+    this.schemaSelect.addEventListener("change", () => this.renderSlice());
+
     this.sliceSlider.addEventListener("input", () => {
-      this.sliceValue.value = this.sliceSlider.value;
-      this.scheduleRender(40);
+      this.setSliceIndex(Number(this.sliceSlider.value));
     });
-    this.sliceThickness.addEventListener("change", () => this.scheduleRender());
     this.axisOrderSelect.addEventListener("change", () => {
       this.updateSliceControls(true);
-      this.scheduleRender();
+      this.updateSlicePlane();
+      this.renderSlice();
     });
-    this.flipX.addEventListener("change", () => this.scheduleRender());
-    this.flipY.addEventListener("change", () => this.scheduleRender());
-    this.flipZ.addEventListener("change", () => this.scheduleRender());
+    this.flipX.addEventListener("change", () => {
+      this.setInspector();
+      this.renderSlice();
+    });
+    this.flipY.addEventListener("change", () => {
+      this.setInspector();
+      this.renderSlice();
+    });
+    this.flipZ.addEventListener("change", () => {
+      this.setInspector();
+      this.renderSlice();
+    });
 
     this.meshModeSelect.addEventListener("change", () => this.updateMeshDisplay());
     this.meshOpacity.addEventListener("input", () => this.updateMeshDisplay());
@@ -185,7 +199,6 @@ class VoxelMeshViewer {
       this.setStatus("Mesh cleared");
     });
     getElement<HTMLButtonElement>("resetCameraButton").addEventListener("click", () => this.resetCamera());
-    getElement<HTMLButtonElement>("refreshButton").addEventListener("click", () => this.scheduleRender(0));
     getElement<HTMLButtonElement>("demoButton").addEventListener("click", () => this.loadDemo());
 
     getElement<HTMLElement>("sliceAxisGroup").addEventListener("click", (event) => {
@@ -203,54 +216,17 @@ class VoxelMeshViewer {
         button.classList.toggle("active", button === target);
       }
       this.updateSliceControls(true);
-      this.scheduleRender();
+      this.updateSlicePlane();
+      this.renderSlice();
     });
 
-    this.canvas.addEventListener("pointermove", (event) => this.inspectPointer(event));
-    this.canvas.addEventListener("pointerleave", () => {
-      this.hoverBox.visible = false;
-      this.setInspector();
-    });
-  }
-
-  private createCategoryControls(): void {
-    this.categoryControls.replaceChildren();
-
-    for (const key of CATEGORY_ORDER) {
-      const definition = CATEGORIES[key];
-      const row = document.createElement("div");
-      row.className = "category-row";
-
-      const checkbox = document.createElement("input");
-      checkbox.type = "checkbox";
-      checkbox.checked = this.categoryState[key].visible;
-      checkbox.addEventListener("change", () => {
-        this.categoryState[key].visible = checkbox.checked;
-        this.scheduleRender();
-      });
-
-      const swatch = document.createElement("span");
-      swatch.className = "swatch";
-      swatch.style.background = definition.color;
-
-      const label = document.createElement("span");
-      label.className = "category-name";
-      label.textContent = definition.label;
-
-      const opacity = document.createElement("input");
-      opacity.type = "range";
-      opacity.min = "0";
-      opacity.max = "1";
-      opacity.step = "0.01";
-      opacity.value = String(this.categoryState[key].opacity);
-      opacity.addEventListener("input", () => {
-        this.categoryState[key].opacity = Number(opacity.value);
-        this.updateVoxelMaterials();
-      });
-
-      row.append(checkbox, swatch, label, opacity);
-      this.categoryControls.append(row);
-    }
+    this.canvas.addEventListener("pointerdown", (event) => this.startSliceDrag(event));
+    this.canvas.addEventListener("pointermove", (event) => this.moveSliceDrag(event));
+    this.canvas.addEventListener("pointerup", () => this.endSliceDrag());
+    this.canvas.addEventListener("pointercancel", () => this.endSliceDrag());
+    this.canvas.addEventListener("wheel", (event) => this.stepSliceFromWheel(event), { passive: false });
+    this.sliceCanvas.addEventListener("pointermove", (event) => this.inspectSlicePointer(event));
+    this.sliceCanvas.addEventListener("pointerleave", () => this.setInspector());
   }
 
   private async loadSelectedVolumeFile(): Promise<void> {
@@ -289,26 +265,12 @@ class VoxelMeshViewer {
     }
 
     this.activeVolume = volume;
+    this.schemaSelect.value = inferSchemaForVolume(volume);
     this.updateSliceControls(true);
+    this.updateSlicePlane();
+    this.renderSlice();
     const warnings = volume.warnings.length ? ` ${volume.warnings.join(" ")}` : "";
     this.setStatus(`Volume ${volume.name}: ${volume.shape.join(" x ")} ${volume.dtype}.${warnings}`);
-    this.postVolumeToWorker(volume);
-  }
-
-  private postVolumeToWorker(volume: VolumeData): void {
-    const requestId = this.nextRequestId();
-    this.worker.postMessage({
-      type: "load",
-      requestId,
-      volume: {
-        name: volume.name,
-        shape: volume.shape,
-        data: volume.data,
-        dtype: volume.dtype,
-        fortranOrder: volume.fortranOrder,
-      },
-      settings: this.collectSettings(),
-    });
   }
 
   private async loadSelectedMeshFile(): Promise<void> {
@@ -423,243 +385,333 @@ class VoxelMeshViewer {
     });
   }
 
-  private scheduleRender(delay = 120): void {
-    window.clearTimeout(this.renderTimer);
-    this.renderTimer = window.setTimeout(() => {
-      if (!this.activeVolume) {
-        return;
-      }
+  private updateSliceControls(resetValue = false): void {
+    const dims = this.activeVolume ? this.getWorldDims() : [1, 1, 1] as [number, number, number];
+    const axisIndex = axisToIndex(this.sliceAxis);
+    const max = dims[axisIndex] - 1;
 
-      const requestId = this.nextRequestId();
-      this.setStatus("Extracting voxels");
-      this.worker.postMessage({
-        type: "render",
-        requestId,
-        settings: this.collectSettings(),
-      });
-    }, delay);
-  }
+    this.sliceSlider.disabled = !this.activeVolume;
+    this.sliceSlider.max = String(max);
+    this.sliceLabel.textContent = `${this.sliceAxis.toUpperCase()} slice`;
 
-  private collectSettings(): RenderSettings {
-    const visibleCategories = Object.fromEntries(
-      CATEGORY_ORDER.map((key) => [key, this.categoryState[key].visible]),
-    ) as Record<CategoryKey, boolean>;
-
-    return {
-      schema: this.schemaSelect.value as LabelSchema,
-      renderMode: this.renderModeSelect.value as RenderMode,
-      sampleStep: Number(this.sampleStep.value),
-      autoSample: this.autoSample.checked,
-      maxVoxels: Number(this.maxVoxels.value),
-      sliceAxis: this.sliceAxis,
-      sliceIndex: Number(this.sliceSlider.value),
-      sliceThickness: Number(this.sliceThickness.value),
-      axisOrder: this.axisOrderSelect.value as AxisOrder,
-      flipX: this.flipX.checked,
-      flipY: this.flipY.checked,
-      flipZ: this.flipZ.checked,
-      visibleCategories,
-    };
-  }
-
-  private handleWorkerMessage(response: WorkerResponse): void {
-    if (response.requestId !== this.requestId) {
+    if (!this.activeVolume) {
+      this.sliceSlider.value = "0";
+      this.sliceValue.value = "-";
+      this.sliceIndex = 0;
       return;
     }
 
-    if (response.type === "status") {
-      this.setStatus(response.message);
-      return;
+    if (resetValue || this.sliceIndex > max) {
+      this.sliceIndex = Math.floor(max / 2);
+      this.sliceSlider.value = String(this.sliceIndex);
     }
 
-    if (response.type === "error") {
-      this.setStatus(response.message);
-      return;
-    }
-
-    this.applyVoxelResult(response);
+    this.sliceValue.value = String(this.sliceIndex);
   }
 
-  private applyVoxelResult(result: WorkerRenderResult): void {
-    this.clearGroup(this.voxelRoot);
-    this.lastCellSize = result.cellSize;
+  private setSliceIndex(index: number): void {
+    const max = this.getSliceMax();
+    this.sliceIndex = clamp(Math.round(index), 0, max);
+    this.sliceSlider.value = String(this.sliceIndex);
+    this.sliceValue.value = String(this.sliceIndex);
+    this.updateSlicePlane();
+    this.renderSlice();
+  }
 
-    for (const group of result.groups) {
-      const geometry = new THREE.BoxGeometry(1, 1, 1);
-      const material = new THREE.MeshStandardMaterial({
-        color: CATEGORIES[group.key].color,
-        roughness: 0.72,
-        metalness: 0,
-        transparent: true,
-        opacity: this.categoryState[group.key].opacity,
-        depthWrite: this.categoryState[group.key].opacity >= 0.9,
-        vertexColors: Boolean(group.colors),
-      });
-      const mesh = new THREE.InstancedMesh(geometry, material, group.count);
-      const matrix = new THREE.Matrix4();
-      const scale = new THREE.Vector3(
-        result.cellSize[0] * 0.94,
-        result.cellSize[1] * 0.94,
-        result.cellSize[2] * 0.94,
-      );
+  private getSliceMax(): number {
+    if (!this.activeVolume) {
+      return 0;
+    }
 
-      for (let index = 0; index < group.count; index += 1) {
-        matrix.compose(
-          new THREE.Vector3(
-            group.positions[index * 3],
-            group.positions[index * 3 + 1],
-            group.positions[index * 3 + 2],
-          ),
-          new THREE.Quaternion(),
-          scale,
-        );
-        mesh.setMatrixAt(index, matrix);
+    const dims = this.getWorldDims();
+    return dims[axisToIndex(this.sliceAxis)] - 1;
+  }
 
-        if (group.colors) {
-          mesh.setColorAt(index, new THREE.Color(
-            group.colors[index * 3],
-            group.colors[index * 3 + 1],
-            group.colors[index * 3 + 2],
-          ));
+  private updateSlicePlane(): void {
+    const dims = this.activeVolume ? this.getWorldDims() : [1, 1, 1] as [number, number, number];
+    const position = indexToWorld(this.sliceIndex, dims[axisToIndex(this.sliceAxis)]);
+
+    this.sliceRoot.position.set(0, 0, 0);
+    this.sliceRoot.rotation.set(0, 0, 0);
+
+    if (this.sliceAxis === "x") {
+      this.sliceRoot.position.x = position;
+      this.sliceRoot.rotation.y = Math.PI / 2;
+    } else if (this.sliceAxis === "y") {
+      this.sliceRoot.position.y = position;
+      this.sliceRoot.rotation.x = Math.PI / 2;
+    } else {
+      this.sliceRoot.position.z = position;
+    }
+  }
+
+  private renderSlice(): void {
+    const volume = this.activeVolume;
+    if (!volume) {
+      this.clearSliceCanvas("Load a volume to see slice colors");
+      this.renderStats.textContent = "No volume loaded";
+      this.renderLegend(new Map());
+      this.setInspector();
+      return;
+    }
+
+    const started = performance.now();
+    const schema = this.schemaSelect.value as LabelSchema;
+    const dims = this.getWorldDims();
+    const [width, height] = this.getSliceSize(dims);
+    const image = this.sliceContext.createImageData(width, height);
+    const counts = new Map<CategoryKey, number>();
+
+    for (let py = 0; py < height; py += 1) {
+      for (let px = 0; px < width; px += 1) {
+        const sample = this.sampleSlicePixel(px, py, height);
+        const category = classifyDisplayLabel(sample.label, schema, volume.visualization ?? "raw");
+        const [r, g, b] = colorForLabel(sample.label, category);
+        const offset = (py * width + px) * 4;
+        image.data[offset] = r;
+        image.data[offset + 1] = g;
+        image.data[offset + 2] = b;
+        image.data[offset + 3] = 255;
+
+        if (category) {
+          counts.set(category, (counts.get(category) ?? 0) + 1);
         }
       }
-
-      mesh.instanceMatrix.needsUpdate = true;
-      if (mesh.instanceColor) {
-        mesh.instanceColor.needsUpdate = true;
-      }
-      mesh.userData = {
-        key: group.key,
-        positions: group.positions,
-        indices: group.indices,
-        labels: group.labels,
-      } satisfies VoxelMeshUserData;
-
-      this.voxelRoot.add(mesh);
     }
 
-    const { stats } = result;
-    const capText = stats.capped ? " capped" : "";
-    this.renderStats.textContent = `${stats.emitted.toLocaleString()} voxels${capText}, scanned ${stats.scanned.toLocaleString()}, step ${stats.step}, ${stats.elapsedMs.toFixed(0)} ms`;
-    this.setStatus(`Rendered ${stats.emitted.toLocaleString()} voxels`);
-    this.hoverBox.visible = false;
+    this.sliceCanvas.width = width;
+    this.sliceCanvas.height = height;
+    this.sliceContext.imageSmoothingEnabled = false;
+    this.sliceContext.putImageData(image, 0, 0);
+    this.renderLegend(counts);
+
+    const elapsed = performance.now() - started;
+    this.renderStats.textContent = `${this.sliceAxis.toUpperCase()}=${this.sliceIndex}, ${width} x ${height}, ${elapsed.toFixed(1)} ms`;
   }
 
-  private updateVoxelMaterials(): void {
-    for (const child of this.voxelRoot.children) {
-      if (!isInstancedMesh(child)) {
+  private clearSliceCanvas(message: string): void {
+    const width = 640;
+    const height = 640;
+    this.sliceCanvas.width = width;
+    this.sliceCanvas.height = height;
+    this.sliceContext.fillStyle = "#eef2f7";
+    this.sliceContext.fillRect(0, 0, width, height);
+    this.sliceContext.fillStyle = "#64748b";
+    this.sliceContext.font = "16px system-ui, sans-serif";
+    this.sliceContext.textAlign = "center";
+    this.sliceContext.fillText(message, width / 2, height / 2);
+  }
+
+  private renderLegend(counts: Map<CategoryKey, number>): void {
+    this.legendList.replaceChildren();
+    const visibleKeys = CATEGORY_ORDER.filter((key) => (counts.get(key) ?? 0) > 0);
+
+    if (visibleKeys.length === 0) {
+      const empty = document.createElement("span");
+      empty.className = "legend-empty";
+      empty.textContent = "No labels on this slice";
+      this.legendList.append(empty);
+      return;
+    }
+
+    for (const key of visibleKeys) {
+      const definition = CATEGORIES[key];
+      if (!definition.visibleInLegend) {
         continue;
       }
 
-      const key = (child.userData as VoxelMeshUserData).key;
-      const material = child.material;
-      if (isMeshMaterial(material)) {
-        material.opacity = this.categoryState[key].opacity;
-        material.transparent = material.opacity < 1;
-        material.depthWrite = material.opacity >= 0.9;
-        material.needsUpdate = true;
-      }
+      const row = document.createElement("div");
+      row.className = "legend-row";
+
+      const swatch = document.createElement("span");
+      swatch.className = "swatch";
+      swatch.style.background = definition.color;
+
+      const label = document.createElement("span");
+      label.textContent = definition.label;
+
+      const count = document.createElement("strong");
+      count.textContent = (counts.get(key) ?? 0).toLocaleString();
+
+      row.append(swatch, label, count);
+      this.legendList.append(row);
     }
   }
 
-  private updateSliceControls(resetValue = false): void {
-    const axis = this.sliceAxis;
-    const dims = this.activeVolume ? getWorldDims(this.activeVolume.shape, this.axisOrderSelect.value as AxisOrder) : [1, 1, 1];
-    const axisIndex = axis === "x" ? 0 : axis === "y" ? 1 : 2;
-    const max = axis === "none" ? 0 : dims[axisIndex] - 1;
+  private sampleSlicePixel(px: number, py: number, height: number): SliceSample {
+    const volume = this.activeVolume;
+    if (!volume) {
+      return {
+        grid: [0, 0, 0],
+        worldIndex: [0, 0, 0],
+        world: new THREE.Vector3(),
+        label: Number.NaN,
+        category: null,
+      };
+    }
 
-    this.sliceSlider.disabled = axis === "none" || !this.activeVolume;
-    this.sliceSlider.max = String(max);
-    this.sliceLabel.textContent = axis === "none" ? "Slice" : `${axis.toUpperCase()} slice`;
+    const dims = this.getWorldDims();
+    const u = px;
+    const v = height - 1 - py;
+    let worldIndex: [number, number, number];
 
-    if (axis === "none") {
-      this.sliceSlider.value = "0";
-      this.sliceValue.value = "-";
+    if (this.sliceAxis === "x") {
+      worldIndex = [this.sliceIndex, v, u];
+    } else if (this.sliceAxis === "y") {
+      worldIndex = [u, this.sliceIndex, v];
+    } else {
+      worldIndex = [u, v, this.sliceIndex];
+    }
+
+    const grid = this.worldIndexToGrid(worldIndex);
+    const label = this.getVolumeValue(grid[0], grid[1], grid[2]);
+    const category = classifyDisplayLabel(
+      label,
+      this.schemaSelect.value as LabelSchema,
+      volume.visualization ?? "raw",
+    );
+    const world = new THREE.Vector3(
+      indexToWorld(worldIndex[0], dims[0]),
+      indexToWorld(worldIndex[1], dims[1]),
+      indexToWorld(worldIndex[2], dims[2]),
+    );
+
+    return { grid, worldIndex, world, label, category };
+  }
+
+  private getSliceSize(dims: [number, number, number]): [number, number] {
+    if (this.sliceAxis === "x") {
+      return [dims[2], dims[1]];
+    }
+    if (this.sliceAxis === "y") {
+      return [dims[0], dims[2]];
+    }
+    return [dims[0], dims[1]];
+  }
+
+  private getWorldDims(): [number, number, number] {
+    if (!this.activeVolume) {
+      return [1, 1, 1];
+    }
+
+    const [nx, ny, nz] = this.activeVolume.shape;
+    return this.axisOrderSelect.value === "xyz" ? [nx, ny, nz] : [nz, ny, nx];
+  }
+
+  private worldIndexToGrid(worldIndex: [number, number, number]): [number, number, number] {
+    const dims = this.getWorldDims();
+    let [x, y, z] = worldIndex;
+
+    if (this.flipX.checked) {
+      x = dims[0] - 1 - x;
+    }
+    if (this.flipY.checked) {
+      y = dims[1] - 1 - y;
+    }
+    if (this.flipZ.checked) {
+      z = dims[2] - 1 - z;
+    }
+
+    if ((this.axisOrderSelect.value as AxisOrder) === "xyz") {
+      return [x, y, z];
+    }
+
+    return [z, y, x];
+  }
+
+  private getVolumeValue(i: number, j: number, k: number): number {
+    const volume = this.activeVolume;
+    if (!volume) {
+      return Number.NaN;
+    }
+
+    const [nx, ny, nz] = volume.shape;
+    const offset = volume.fortranOrder
+      ? i + nx * (j + ny * k)
+      : k + nz * (j + ny * i);
+    return Number(volume.data[offset]);
+  }
+
+  private startSliceDrag(event: PointerEvent): void {
+    if (!this.activeVolume) {
       return;
     }
 
-    if (resetValue || Number(this.sliceSlider.value) > max) {
-      this.sliceSlider.value = String(Math.floor(max / 2));
+    this.setPointerFromEvent(event);
+    this.raycaster.setFromCamera(this.pointer, this.camera);
+    const hits = this.raycaster.intersectObject(this.slicePlane, true);
+    if (hits.length === 0) {
+      return;
     }
-    this.sliceValue.value = this.sliceSlider.value;
+
+    this.draggingSlice = true;
+    this.dragStartPointer.set(event.clientX, event.clientY);
+    this.dragStartIndex = this.sliceIndex;
+    this.controls.enabled = false;
+    this.canvas.setPointerCapture(event.pointerId);
+    this.canvas.classList.add("dragging");
   }
 
-  private inspectPointer(event: PointerEvent): void {
+  private moveSliceDrag(event: PointerEvent): void {
+    if (!this.draggingSlice) {
+      return;
+    }
+
+    const dx = event.clientX - this.dragStartPointer.x;
+    const dy = this.dragStartPointer.y - event.clientY;
+    const delta = this.sliceAxis === "x" ? dx : dy;
+    const max = this.getSliceMax();
+    const sensitivity = Math.max(4, Math.min(12, 360 / Math.max(1, max + 1)));
+    this.setSliceIndex(this.dragStartIndex + Math.round(delta / sensitivity));
+  }
+
+  private endSliceDrag(): void {
+    if (!this.draggingSlice) {
+      return;
+    }
+
+    this.draggingSlice = false;
+    this.controls.enabled = true;
+    this.canvas.classList.remove("dragging");
+  }
+
+  private stepSliceFromWheel(event: WheelEvent): void {
+    if (!this.activeVolume) {
+      return;
+    }
+
+    event.preventDefault();
+    const direction = event.deltaY > 0 ? -1 : 1;
+    this.setSliceIndex(this.sliceIndex + direction);
+  }
+
+  private inspectSlicePointer(event: PointerEvent): void {
+    if (!this.activeVolume || this.sliceCanvas.width === 0 || this.sliceCanvas.height === 0) {
+      this.setInspector();
+      return;
+    }
+
+    const rect = this.sliceCanvas.getBoundingClientRect();
+    const px = clamp(Math.floor((event.clientX - rect.left) / rect.width * this.sliceCanvas.width), 0, this.sliceCanvas.width - 1);
+    const py = clamp(Math.floor((event.clientY - rect.top) / rect.height * this.sliceCanvas.height), 0, this.sliceCanvas.height - 1);
+    const sample = this.sampleSlicePixel(px, py, this.sliceCanvas.height);
+
+    this.setInspector({
+      Grid: `[${sample.grid.join(", ")}]`,
+      World: formatVector(sample.world),
+      Label: formatDisplayLabel(sample.label, this.activeVolume.visualization ?? "raw"),
+      Category: sample.category ? categoryDisplayName(sample.category) : "-",
+    });
+  }
+
+  private setPointerFromEvent(event: PointerEvent): void {
     const rect = this.canvas.getBoundingClientRect();
     this.pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
     this.pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
-    this.raycaster.setFromCamera(this.pointer, this.camera);
-
-    const voxelHits = this.raycaster.intersectObjects(this.voxelRoot.children, false);
-    const voxelHit = voxelHits.find((hit) => hit.instanceId !== undefined);
-    if (voxelHit?.instanceId !== undefined && isInstancedMesh(voxelHit.object)) {
-      this.inspectVoxel(voxelHit.object, voxelHit.instanceId);
-      return;
-    }
-
-    const meshHits = this.raycaster
-      .intersectObjects(this.meshRoot.children, true)
-      .filter((hit) => hit.object.userData.viewerRole !== "wire");
-
-    if (meshHits[0]) {
-      const hit = meshHits[0];
-      this.hoverBox.visible = false;
-      this.setInspector({
-        Target: "Mesh triangle",
-        Grid: "-",
-        World: formatVector(hit.point),
-        Label: hit.faceIndex === undefined ? "-" : `face ${hit.faceIndex}`,
-        Category: hit.object.name || "mesh",
-      });
-      return;
-    }
-
-    this.hoverBox.visible = false;
-    this.setInspector();
-  }
-
-  private inspectVoxel(mesh: THREE.InstancedMesh, instanceId: number): void {
-    const data = mesh.userData as VoxelMeshUserData;
-    const p = instanceId * 3;
-    const position = new THREE.Vector3(
-      data.positions[p],
-      data.positions[p + 1],
-      data.positions[p + 2],
-    );
-    const grid = [
-      data.indices[p],
-      data.indices[p + 1],
-      data.indices[p + 2],
-    ];
-    const label = data.labels[instanceId];
-    const category = data.key;
-
-    this.hoverBox.position.copy(position);
-    this.hoverBox.scale.set(
-      this.lastCellSize[0] * 1.08,
-      this.lastCellSize[1] * 1.08,
-      this.lastCellSize[2] * 1.08,
-    );
-    this.hoverBox.visible = true;
-
-    const idText = category === "components"
-      ? `component ${formatLabel(label)}`
-      : isCaseCategory(category)
-        ? `case ${formatLabel(label)}`
-        : formatLabel(label);
-
-    this.setInspector({
-      Target: "Voxel",
-      Grid: `[${grid.join(", ")}]`,
-      World: formatVector(position),
-      Label: idText,
-      Category: categoryDisplayName(category),
-    });
   }
 
   private setInspector(values?: Record<string, string>): void {
     const data = values ?? {
-      Target: "-",
       Grid: "-",
       World: "-",
       Label: "-",
@@ -724,30 +776,13 @@ class VoxelMeshViewer {
     }
   }
 
-  private nextRequestId(): number {
-    this.requestId += 1;
-    return this.requestId;
-  }
-
   private setStatus(message: string): void {
     this.statusText.textContent = message;
   }
 }
 
-function createCategoryState(): Record<CategoryKey, CategoryControlState> {
-  return Object.fromEntries(
-    CATEGORY_ORDER.map((key) => [
-      key,
-      {
-        visible: CATEGORIES[key].defaultVisible,
-        opacity: CATEGORIES[key].defaultOpacity,
-      },
-    ]),
-  ) as Record<CategoryKey, CategoryControlState>;
-}
-
 function createDemoVolume(): VolumeData {
-  const size = 56;
+  const size = 96;
   const data = new Uint8Array(size * size * size);
   const cell = 2 / size;
   const radius = 0.62;
@@ -761,6 +796,7 @@ function createDemoVolume(): VolumeData {
         const z = -1 + (k + 0.5) * cell;
         const distance = Math.hypot(x, y, z);
         const offset = k + size * (j + size * i);
+
         if (Math.abs(distance - radius) < cell * 0.85) {
           data[offset] = 4;
         } else if (Math.abs(distance - radius) < bandWidth && x > -0.18) {
@@ -775,7 +811,7 @@ function createDemoVolume(): VolumeData {
   }
 
   return {
-    name: "demo_semantic_volume",
+    name: "demo_pipeline_labels",
     shape: [size, size, size],
     sourceShape: [size, size, size],
     data,
@@ -802,11 +838,155 @@ function normalizeIntoUnitBox(object: THREE.Object3D): THREE.Object3D {
   return wrapper;
 }
 
-function getWorldDims(
-  [nx, ny, nz]: [number, number, number],
-  axisOrder: AxisOrder,
-): [number, number, number] {
-  return axisOrder === "xyz" ? [nx, ny, nz] : [nz, ny, nx];
+function classifyDisplayLabel(
+  label: number,
+  schema: LabelSchema,
+  visualization: VolumeData["visualization"],
+): CategoryKey | null {
+  if (!Number.isFinite(label)) {
+    return null;
+  }
+
+  if (visualization === "caseOverlay") {
+    if (label >= CASE_OVERLAY_OFFSET) {
+      return caseIdToCategory(label - CASE_OVERLAY_OFFSET);
+    }
+    return classifyLabel(label, "semantic");
+  }
+
+  if (visualization === "componentOverlay") {
+    if (label >= COMPONENT_OVERLAY_OFFSET) {
+      return "components";
+    }
+    return classifyLabel(label, "semantic");
+  }
+
+  return classifyLabel(label, schema);
+}
+
+function colorForLabel(label: number, category: CategoryKey | null): [number, number, number] {
+  if (category === "components") {
+    const componentId = label >= CASE_OVERLAY_OFFSET
+      ? label - CASE_OVERLAY_OFFSET
+      : label >= COMPONENT_OVERLAY_OFFSET
+        ? label - COMPONENT_OVERLAY_OFFSET
+        : label;
+    return componentColor(componentId);
+  }
+
+  if (!category) {
+    return [127, 127, 127];
+  }
+
+  return hexToRgb(CATEGORIES[category].color);
+}
+
+function caseIdToCategory(caseId: number): CategoryKey {
+  switch (Math.trunc(caseId)) {
+    case 1:
+      return "insideOnly";
+    case 2:
+      return "outsideOnly";
+    case 3:
+      return "bothSides";
+    case 4:
+      return "isolated";
+    default:
+      return "components";
+  }
+}
+
+function inferSchemaForVolume(volume: VolumeData): LabelSchema {
+  if (volume.visualization === "caseOverlay") {
+    return "cases";
+  }
+  if (volume.visualization === "componentOverlay") {
+    return "components";
+  }
+  if (volume.visualization === "pipelineLabels") {
+    return "semantic";
+  }
+
+  const lowerName = volume.name.toLowerCase();
+  if (lowerName.includes("case")) {
+    return "cases";
+  }
+  if (lowerName.includes("component") || lowerName.includes("ccl")) {
+    return "components";
+  }
+  return "semantic";
+}
+
+function componentColor(label: number): [number, number, number] {
+  const seed = Math.abs(Math.trunc(label));
+  const hue = ((seed * 137.508) % 360) / 360;
+  const [r, g, b] = hslToRgb(hue, schemaSaturation(label), 0.57);
+  return [
+    Math.round(r * 255),
+    Math.round(g * 255),
+    Math.round(b * 255),
+  ];
+}
+
+function schemaSaturation(label: number): number {
+  return Number.isFinite(label) ? 0.68 : 0;
+}
+
+function hslToRgb(h: number, s: number, l: number): [number, number, number] {
+  if (s === 0) {
+    return [l, l, l];
+  }
+
+  const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+  const p = 2 * l - q;
+  return [
+    hueToRgb(p, q, h + 1 / 3),
+    hueToRgb(p, q, h),
+    hueToRgb(p, q, h - 1 / 3),
+  ];
+}
+
+function hueToRgb(p: number, q: number, t: number): number {
+  let value = t;
+  if (value < 0) {
+    value += 1;
+  }
+  if (value > 1) {
+    value -= 1;
+  }
+  if (value < 1 / 6) {
+    return p + (q - p) * 6 * value;
+  }
+  if (value < 1 / 2) {
+    return q;
+  }
+  if (value < 2 / 3) {
+    return p + (q - p) * (2 / 3 - value) * 6;
+  }
+  return p;
+}
+
+function hexToRgb(hex: string): [number, number, number] {
+  const normalized = hex.replace("#", "");
+  return [
+    Number.parseInt(normalized.slice(0, 2), 16),
+    Number.parseInt(normalized.slice(2, 4), 16),
+    Number.parseInt(normalized.slice(4, 6), 16),
+  ];
+}
+
+function indexToWorld(index: number, dimension: number): number {
+  return -1 + (index + 0.5) * 2 / Math.max(1, dimension);
+}
+
+function axisToIndex(axis: SliceAxis): 0 | 1 | 2 {
+  if (axis === "x") {
+    return 0;
+  }
+  if (axis === "y") {
+    return 1;
+  }
+  return 2;
 }
 
 function disposeObject(object: THREE.Object3D): void {
@@ -827,20 +1007,12 @@ function isMesh(object: THREE.Object3D): object is THREE.Mesh<THREE.BufferGeomet
   return (object as THREE.Mesh).isMesh === true;
 }
 
-function isInstancedMesh(object: THREE.Object3D): object is THREE.InstancedMesh {
-  return (object as THREE.InstancedMesh).isInstancedMesh === true;
-}
-
 function isLineSegments(object: THREE.Object3D): object is THREE.LineSegments {
   return (object as THREE.LineSegments).isLineSegments === true;
 }
 
 function isMeshMaterial(material: THREE.Material | THREE.Material[]): material is THREE.MeshStandardMaterial {
   return !Array.isArray(material) && "opacity" in material;
-}
-
-function isCaseCategory(category: CategoryKey): boolean {
-  return category === "insideOnly" || category === "outsideOnly" || category === "bothSides" || category === "isolated";
 }
 
 function formatVector(vector: THREE.Vector3): string {
@@ -851,8 +1023,30 @@ function formatLabel(label: number): string {
   return Number.isInteger(label) ? String(label) : label.toFixed(4);
 }
 
+function formatDisplayLabel(label: number, visualization: VolumeData["visualization"]): string {
+  if (visualization === "caseOverlay" && label >= CASE_OVERLAY_OFFSET) {
+    return `case ${formatLabel(label - CASE_OVERLAY_OFFSET)}`;
+  }
+  if (visualization === "componentOverlay" && label >= COMPONENT_OVERLAY_OFFSET) {
+    return `component ${formatLabel(label - COMPONENT_OVERLAY_OFFSET)}`;
+  }
+  return formatLabel(label);
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function mustGetContext(canvas: HTMLCanvasElement): CanvasRenderingContext2D {
+  const context = canvas.getContext("2d", { alpha: false });
+  if (!context) {
+    throw new Error("Could not create a 2D canvas context.");
+  }
+  return context;
 }
 
 function getElement<T extends HTMLElement>(id: string): T {
@@ -863,4 +1057,4 @@ function getElement<T extends HTMLElement>(id: string): T {
   return element as T;
 }
 
-new VoxelMeshViewer();
+new MeshSliceViewer();

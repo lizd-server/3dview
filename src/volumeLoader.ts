@@ -1,5 +1,10 @@
 import { unzipSync } from "fflate";
-import type { NumericArray, VolumeData } from "./types";
+import {
+  CASE_OVERLAY_OFFSET,
+  COMPONENT_OVERLAY_OFFSET,
+  type NumericArray,
+  type VolumeData,
+} from "./types";
 
 interface NpyHeader {
   descr: string;
@@ -34,8 +39,8 @@ export async function loadVolumeFile(file: File): Promise<VolumeData[]> {
       throw new Error("No .npy arrays were found inside the .npz file.");
     }
 
-    const synthesized = synthesizePipelineLabels(parsed);
-    const volumes = synthesized ? [synthesized, ...parsed] : parsed;
+    const synthesized = synthesizeDerivedVolumes(parsed);
+    const volumes = [...synthesized, ...parsed];
     return volumes.sort((a, b) => scoreArrayName(b.name) - scoreArrayName(a.name));
   }
 
@@ -79,6 +84,7 @@ export function parseNpy(buffer: ArrayBuffer, name: string): VolumeData {
     dtype: header.descr,
     fortranOrder: header.fortranOrder,
     warnings,
+    visualization: "raw",
   };
 }
 
@@ -267,6 +273,12 @@ function sliceBytes(bytes: Uint8Array): ArrayBuffer {
 function scoreArrayName(name: string): number {
   const lower = name.toLowerCase();
   let score = 0;
+  if (lower.includes("ccl_cases_overlay") || lower.includes("case_overlay")) {
+    score += 14;
+  }
+  if (lower.includes("ccl_components_overlay") || lower.includes("component_overlay")) {
+    score += 13;
+  }
   if (lower.includes("pipeline_labels") || lower.includes("semantic_labels")) {
     score += 10;
   }
@@ -288,24 +300,75 @@ function scoreArrayName(name: string): number {
   return score;
 }
 
-function synthesizePipelineLabels(volumes: VolumeData[]): VolumeData | null {
+function synthesizeDerivedVolumes(volumes: VolumeData[]): VolumeData[] {
   const byName = new Map(volumes.map((volume) => [normalizeArrayName(volume.name), volume]));
   const outside = byName.get("outside");
   if (!outside) {
-    return null;
+    return [];
   }
 
   const inside = byName.get("inside") ?? null;
   const band = byName.get("band") ?? null;
   const surfaceBarrier = byName.get("surface_barrier") ?? byName.get("surface-barrier") ?? null;
-  const candidates = [inside, band, surfaceBarrier].filter((volume): volume is VolumeData => Boolean(volume));
+  const derived: VolumeData[] = [];
+  const caseVolume = findFirstVolume(byName, [
+    "component_case",
+    "component_cases",
+    "final_ccl_case",
+    "final_ccl_cases",
+  ]);
+  const componentVolume = findFirstVolume(byName, [
+    "component",
+    "components",
+    "component_id",
+    "component_ids",
+    "component_label",
+    "component_labels",
+    "ccl_component",
+    "ccl_components",
+    "final_component",
+    "final_components",
+    "final_ccl_component",
+    "final_ccl_components",
+  ]);
 
-  for (const candidate of candidates) {
-    if (!sameShape(candidate.shape, outside.shape)) {
-      throw new Error(`Cannot synthesize labels: ${candidate.name} has shape ${candidate.shape.join(" x ")}, expected ${outside.shape.join(" x ")}.`);
-    }
+  if (caseVolume) {
+    derived.push(synthesizeOverlayVolume({
+      name: "ccl_cases_overlay",
+      outside,
+      inside,
+      overlay: caseVolume,
+      overlayOffset: CASE_OVERLAY_OFFSET,
+      surfaceBarrier,
+      visualization: "caseOverlay",
+      warning: "Synthesized from outside/inside/surface_barrier plus case ids. Draw order: inside/outside base, case overlay, then surface barrier.",
+    }));
   }
 
+  if (componentVolume) {
+    derived.push(synthesizeOverlayVolume({
+      name: "ccl_components_overlay",
+      outside,
+      inside,
+      overlay: componentVolume,
+      overlayOffset: COMPONENT_OVERLAY_OFFSET,
+      surfaceBarrier,
+      visualization: "componentOverlay",
+      warning: "Synthesized from outside/inside/surface_barrier plus component ids. Draw order: inside/outside base, component overlay, then surface barrier.",
+    }));
+  }
+
+  derived.push(synthesizePipelineLabels(outside, inside, band, surfaceBarrier));
+  return derived;
+}
+
+function synthesizePipelineLabels(
+  outside: VolumeData,
+  inside: VolumeData | null,
+  band: VolumeData | null,
+  surfaceBarrier: VolumeData | null,
+): VolumeData {
+  assertSameShapes(outside, [inside, band, surfaceBarrier]);
   const [nx, ny, nz] = outside.shape;
   const labels = new Uint8Array(nx * ny * nz);
 
@@ -342,6 +405,66 @@ function synthesizePipelineLabels(volumes: VolumeData[]): VolumeData | null {
     warnings: [
       "Synthesized from outside/inside/band/surface_barrier masks using labels 0 unknown, 1 outside, 2 inside, 3 band, 4 surface barrier.",
     ],
+    visualization: "pipelineLabels",
+  };
+}
+
+function synthesizeOverlayVolume({
+  name,
+  outside,
+  inside,
+  overlay,
+  overlayOffset,
+  surfaceBarrier,
+  visualization,
+  warning,
+}: {
+  name: string;
+  outside: VolumeData;
+  inside: VolumeData | null;
+  overlay: VolumeData;
+  overlayOffset: number;
+  surfaceBarrier: VolumeData | null;
+  visualization: "componentOverlay" | "caseOverlay";
+  warning: string;
+}): VolumeData {
+  assertSameShapes(outside, [inside, overlay, surfaceBarrier]);
+  const [nx, ny, nz] = outside.shape;
+  const labels = new Int32Array(nx * ny * nz);
+
+  for (let i = 0; i < nx; i += 1) {
+    for (let j = 0; j < ny; j += 1) {
+      for (let k = 0; k < nz; k += 1) {
+        const offset = k + nz * (j + ny * i);
+        const isOutside = Boolean(getVolumeValue(outside, i, j, k));
+        const isInside = inside ? Boolean(getVolumeValue(inside, i, j, k)) : !isOutside;
+        const overlayValue = Math.trunc(getVolumeValue(overlay, i, j, k));
+
+        if (isInside) {
+          labels[offset] = 2;
+        }
+        if (isOutside) {
+          labels[offset] = 1;
+        }
+        if (overlayValue > 0) {
+          labels[offset] = overlayOffset + overlayValue;
+        }
+        if (surfaceBarrier && Boolean(getVolumeValue(surfaceBarrier, i, j, k))) {
+          labels[offset] = 4;
+        }
+      }
+    }
+  }
+
+  return {
+    name,
+    shape: outside.shape,
+    sourceShape: outside.sourceShape,
+    data: labels,
+    dtype: "<i4",
+    fortranOrder: false,
+    warnings: [warning],
+    visualization,
   };
 }
 
@@ -351,6 +474,24 @@ function normalizeArrayName(name: string): string {
     .pop()
     ?.replace(/\.npy$/i, "")
     .toLowerCase() ?? name.toLowerCase();
+}
+
+function findFirstVolume(byName: Map<string, VolumeData>, names: string[]): VolumeData | null {
+  for (const name of names) {
+    const volume = byName.get(name);
+    if (volume) {
+      return volume;
+    }
+  }
+  return null;
+}
+
+function assertSameShapes(anchor: VolumeData, candidates: Array<VolumeData | null>): void {
+  for (const candidate of candidates) {
+    if (candidate && !sameShape(candidate.shape, anchor.shape)) {
+      throw new Error(`Cannot synthesize labels: ${candidate.name} has shape ${candidate.shape.join(" x ")}, expected ${anchor.shape.join(" x ")}.`);
+    }
+  }
 }
 
 function sameShape(a: [number, number, number], b: [number, number, number]): boolean {

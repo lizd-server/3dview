@@ -12,6 +12,11 @@ interface NpyHeader {
 }
 
 const decoder = new TextDecoder("latin1");
+const HOST_IS_LITTLE_ENDIAN = (() => {
+  const buffer = new ArrayBuffer(2);
+  new DataView(buffer).setUint16(0, 256, true);
+  return new Uint16Array(buffer)[0] === 256;
+})();
 
 export function parseNpy(buffer: ArrayBuffer, name: string): VolumeData {
   const bytes = new Uint8Array(buffer);
@@ -39,39 +44,39 @@ export function parseNpy(buffer: ArrayBuffer, name: string): VolumeData {
   const elementCount = header.shape.reduce((product, dimension) => product * dimension, 1);
   const warnings: string[] = [];
   const data = decodeData(buffer, header.dataOffset, header.descr, elementCount, warnings);
-
-  return {
-    name,
-    shape: toShape3(header.shape),
-    sourceShape: header.shape,
-    data,
-    dtype: header.descr,
-    fortranOrder: header.fortranOrder,
-    warnings,
-    visualization: pipelineVisualizationForName(name),
-  };
-}
-
-function pipelineVisualizationForName(name: string): VolumeVisualization {
   const baseName = name
     .split("/")
     .pop()
     ?.replace(/\.npy$/i, "")
     .toLowerCase() ?? name.toLowerCase();
+  let visualization: VolumeVisualization;
 
   if (/^\d{3}_final_ccl_labels$/.test(baseName) || /^\d{3}_inside_filtered_labels$/.test(baseName)) {
-    return "pipelineLabels";
-  }
-  if (/^\d{3}_final_ccl_components$/.test(baseName)) {
-    return "finalCclComponents";
-  }
-  if (/^\d{3}_final_ccl_cases$/.test(baseName)) {
-    return "finalCclCases";
+    visualization = "pipelineLabels";
+  } else if (/^\d{3}_final_ccl_components$/.test(baseName)) {
+    visualization = "finalCclComponents";
+  } else if (/^\d{3}_final_ccl_cases$/.test(baseName)) {
+    visualization = "finalCclCases";
+  } else {
+    throw new Error(
+      `${name} is not a supported pipeline debug volume. Expected NNN_final_ccl_labels.npy, NNN_final_ccl_components.npy, NNN_final_ccl_cases.npy, or MMM_inside_filtered_labels.npy.`,
+    );
   }
 
-  throw new Error(
-    `${name} is not a supported pipeline debug volume. Expected NNN_final_ccl_labels.npy, NNN_final_ccl_components.npy, NNN_final_ccl_cases.npy, or MMM_inside_filtered_labels.npy.`,
-  );
+  if (header.shape.length !== 3) {
+    throw new Error(`Expected a 3D pipeline volume, got shape (${header.shape.join(", ")}).`);
+  }
+
+  return {
+    name,
+    shape: [header.shape[0], header.shape[1], header.shape[2]],
+    sourceShape: header.shape,
+    data,
+    dtype: header.descr,
+    fortranOrder: header.fortranOrder,
+    warnings,
+    visualization,
+  };
 }
 
 function parseHeader(headerText: string, dataOffset: number): NpyHeader {
@@ -117,7 +122,7 @@ function decodeData(
     throw new Error(`The .npy payload is shorter than expected for dtype ${descr}.`);
   }
 
-  const littleEndian = byteOrder === "<" || byteOrder === "|" || (byteOrder === "=" && isLittleEndianHost());
+  const littleEndian = byteOrder === "<" || byteOrder === "|" || (byteOrder === "=" && HOST_IS_LITTLE_ENDIAN);
   const isHalfFloat = kind === "f" && itemSize === 2;
 
   if (littleEndian && !isHalfFloat && itemSize !== 8) {
@@ -211,14 +216,6 @@ function decodeData(
   throw new Error(`Unsupported NumPy dtype ${descr}.`);
 }
 
-function toShape3(shape: number[]): [number, number, number] {
-  if (shape.length !== 3) {
-    throw new Error(`Expected a 3D pipeline volume, got shape (${shape.join(", ")}).`);
-  }
-
-  return [shape[0], shape[1], shape[2]];
-}
-
 function halfToFloat(value: number): number {
   const sign = (value & 0x8000) ? -1 : 1;
   const exponent = (value >> 10) & 0x1f;
@@ -233,10 +230,4 @@ function halfToFloat(value: number): number {
   }
 
   return sign * 2 ** (exponent - 15) * (1 + fraction / 2 ** 10);
-}
-
-function isLittleEndianHost(): boolean {
-  const buffer = new ArrayBuffer(2);
-  new DataView(buffer).setUint16(0, 256, true);
-  return new Uint16Array(buffer)[0] === 256;
 }

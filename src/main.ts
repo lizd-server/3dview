@@ -49,7 +49,7 @@ interface MeshItem {
 class MeshSliceViewer {
   private readonly canvas = getElement<HTMLCanvasElement>("viewerCanvas");
   private readonly sliceCanvas = getElement<HTMLCanvasElement>("sliceCanvas");
-  private readonly sliceContext = mustGetContext(this.sliceCanvas);
+  private readonly sliceContext: CanvasRenderingContext2D;
   private readonly sliceTexture = new THREE.CanvasTexture(this.sliceCanvas);
   private readonly statusText = getElement<HTMLElement>("statusText");
   private readonly renderStats = getElement<HTMLElement>("renderStats");
@@ -101,6 +101,12 @@ class MeshSliceViewer {
   private slicePlaneHasTexture = false;
 
   constructor() {
+    const sliceContext = this.sliceCanvas.getContext("2d", { alpha: false });
+    if (!sliceContext) {
+      throw new Error("Could not create a 2D canvas context.");
+    }
+    this.sliceContext = sliceContext;
+
     this.scene.background = new THREE.Color("#f3f6fa");
     this.scene.add(this.meshRoot, this.sliceRoot);
 
@@ -562,21 +568,12 @@ class MeshSliceViewer {
   }
 
   private setSliceIndex(index: number): void {
-    const max = this.getSliceMax();
+    const max = this.activeVolume ? this.getWorldDims()[axisToIndex(this.sliceAxis)] - 1 : 0;
     this.sliceIndex = clamp(Math.round(index), 0, max);
     this.sliceSlider.value = String(this.sliceIndex);
     this.sliceValue.value = String(this.sliceIndex);
     this.updateSlicePlane();
     this.renderSlice();
-  }
-
-  private getSliceMax(): number {
-    if (!this.activeVolume) {
-      return 0;
-    }
-
-    const dims = this.getWorldDims();
-    return dims[axisToIndex(this.sliceAxis)] - 1;
   }
 
   private updateSlicePlane(): void {
@@ -650,7 +647,11 @@ class MeshSliceViewer {
 
     const started = performance.now();
     const dims = this.getWorldDims();
-    const [width, height] = this.getSliceSize(dims);
+    const [width, height] = this.sliceAxis === "x"
+      ? [dims[2], dims[1]]
+      : this.sliceAxis === "y"
+        ? [dims[0], dims[2]]
+        : [dims[0], dims[1]];
     const image = this.sliceContext.createImageData(width, height);
     const counts = new Map<CategoryKey, number>();
 
@@ -766,8 +767,12 @@ class MeshSliceViewer {
       worldIndex = [u, v, this.sliceIndex];
     }
 
-    const grid = this.worldIndexToGrid(worldIndex);
-    const label = this.getActiveVolumeValue(grid[0], grid[1], grid[2]);
+    const grid = worldIndex;
+    const [nx, ny, nz] = volume.shape;
+    const offset = volume.fortranOrder
+      ? grid[0] + nx * (grid[1] + ny * grid[2])
+      : grid[2] + nz * (grid[1] + ny * grid[0]);
+    const label = Number(volume.data[offset]);
     const { category } = this.getSampleDisplay({ grid, worldIndex, world: new THREE.Vector3(), label, category: null });
     const world = new THREE.Vector3(
       indexToWorld(worldIndex[0], dims[0]),
@@ -794,16 +799,6 @@ class MeshSliceViewer {
     };
   }
 
-  private getSliceSize(dims: [number, number, number]): [number, number] {
-    if (this.sliceAxis === "x") {
-      return [dims[2], dims[1]];
-    }
-    if (this.sliceAxis === "y") {
-      return [dims[0], dims[2]];
-    }
-    return [dims[0], dims[1]];
-  }
-
   private getWorldDims(): [number, number, number] {
     if (!this.activeVolume) {
       return [1, 1, 1];
@@ -811,27 +806,6 @@ class MeshSliceViewer {
 
     const [nx, ny, nz] = this.activeVolume.shape;
     return [nx, ny, nz];
-  }
-
-  private worldIndexToGrid(worldIndex: [number, number, number]): [number, number, number] {
-    return worldIndex;
-  }
-
-  private getActiveVolumeValue(i: number, j: number, k: number): number {
-    const volume = this.activeVolume;
-    if (!volume) {
-      return Number.NaN;
-    }
-
-    return this.getVolumeValue(volume, i, j, k);
-  }
-
-  private getVolumeValue(volume: VolumeData, i: number, j: number, k: number): number {
-    const [nx, ny, nz] = volume.shape;
-    const offset = volume.fortranOrder
-      ? i + nx * (j + ny * k)
-      : k + nz * (j + ny * i);
-    return Number(volume.data[offset]);
   }
 
   private inspectSlicePointer(event: PointerEvent): void {
@@ -844,10 +818,16 @@ class MeshSliceViewer {
     const px = clamp(Math.floor((event.clientX - rect.left) / rect.width * this.sliceCanvas.width), 0, this.sliceCanvas.width - 1);
     const py = clamp(Math.floor((event.clientY - rect.top) / rect.height * this.sliceCanvas.height), 0, this.sliceCanvas.height - 1);
     const sample = this.sampleSlicePixel(px, py, this.sliceCanvas.height);
+    const label = Number.isInteger(sample.label) ? String(sample.label) : sample.label.toFixed(4);
+    const labelText = this.activeVolume.visualization === "finalCclComponents" && sample.label > 3
+      ? `component ${Number.isInteger(sample.label - 3) ? String(sample.label - 3) : (sample.label - 3).toFixed(4)}`
+      : this.activeVolume.visualization === "finalCclCases" && sample.category
+        ? `${label} ${categoryDisplayName(sample.category)}`
+        : label;
     const values: Record<string, string> = {
       Grid: `[${sample.grid.join(", ")}]`,
-      World: formatVector(sample.world),
-      Label: formatDisplayLabel(sample.label, this.activeVolume.visualization),
+      World: `[${sample.world.x.toFixed(4)}, ${sample.world.y.toFixed(4)}, ${sample.world.z.toFixed(4)}]`,
+      Label: labelText,
       Category: sample.category ? categoryDisplayName(sample.category) : "-",
     };
 
@@ -924,7 +904,10 @@ function findPipelineFolderSelection(files: File[]): PipelineFolderSelection {
   const meshes = new Map<string, File>();
 
   for (const file of files) {
-    const { directory, name } = splitFilePath(getFileRelativePath(file));
+    const path = (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name;
+    const parts = path.split("/").filter(Boolean);
+    const name = parts.pop() ?? path;
+    const directory = parts.join("/");
     const lowerName = name.toLowerCase();
 
     if (lowerName === "voxel_input_mesh.ply") {
@@ -960,11 +943,21 @@ function findPipelineFolderSelection(files: File[]): PipelineFolderSelection {
     );
   }
 
-  const completeCandidates = available.filter(hasRequiredPipelineVolumes);
+  const completeCandidates = available.filter((candidate) => candidate.label && candidate.components && candidate.cases);
   if (completeCandidates.length === 0) {
     const first = available[0];
+    const missing: string[] = [];
+    if (!first.label) {
+      missing.push(`${first.prefix}_final_ccl_labels.npy`);
+    }
+    if (!first.components) {
+      missing.push(`${first.prefix}_final_ccl_components.npy`);
+    }
+    if (!first.cases) {
+      missing.push(`${first.prefix}_final_ccl_cases.npy`);
+    }
     throw new Error(
-      `Missing required final CCL volumes in ${first.directory || "(selected folder)"} for prefix ${first.prefix}: ${missingRequiredPipelineVolumes(first).join(", ")}.`,
+      `Missing required final CCL volumes in ${first.directory || "(selected folder)"} for prefix ${first.prefix}: ${missing.join(", ")}.`,
     );
   }
 
@@ -985,7 +978,8 @@ function findPipelineFolderSelection(files: File[]): PipelineFolderSelection {
 
   return {
     directory: selected.directory,
-    volumes: volumeFilesForCandidate(selected),
+    volumes: [selected.label, selected.components, selected.cases, selected.insideFiltered]
+      .filter((file): file is File => Boolean(file)),
     mesh,
   };
 }
@@ -1019,54 +1013,6 @@ function parsePipelineNpyFileName(name: string): { prefix: string; role: Pipelin
   return null;
 }
 
-function volumeFilesForCandidate(candidate: PipelineFolderCandidate): File[] {
-  const files: File[] = [];
-  if (candidate.label) {
-    files.push(candidate.label);
-  }
-  if (candidate.components) {
-    files.push(candidate.components);
-  }
-  if (candidate.cases) {
-    files.push(candidate.cases);
-  }
-  if (candidate.insideFiltered) {
-    files.push(candidate.insideFiltered);
-  }
-  return files;
-}
-
-function hasRequiredPipelineVolumes(candidate: PipelineFolderCandidate): boolean {
-  return Boolean(candidate.label && candidate.components && candidate.cases);
-}
-
-function missingRequiredPipelineVolumes(candidate: PipelineFolderCandidate): string[] {
-  const missing: string[] = [];
-  if (!candidate.label) {
-    missing.push(`${candidate.prefix}_final_ccl_labels.npy`);
-  }
-  if (!candidate.components) {
-    missing.push(`${candidate.prefix}_final_ccl_components.npy`);
-  }
-  if (!candidate.cases) {
-    missing.push(`${candidate.prefix}_final_ccl_cases.npy`);
-  }
-  return missing;
-}
-
-function getFileRelativePath(file: File): string {
-  return (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name;
-}
-
-function splitFilePath(path: string): { directory: string; name: string } {
-  const parts = path.split("/").filter(Boolean);
-  const name = parts.pop() ?? path;
-  return {
-    directory: parts.join("/"),
-    name,
-  };
-}
-
 function yieldToBrowser(): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, 0));
 }
@@ -1077,7 +1023,7 @@ function colorForLabel(
   visualization: VolumeData["visualization"],
 ): [number, number, number] {
   if (category === "components") {
-    const componentId = componentIdForDisplayLabel(label, visualization);
+    const componentId = visualization === "finalCclComponents" ? Math.max(0, label - 3) : label;
     return componentColor(componentId);
   }
 
@@ -1085,29 +1031,23 @@ function colorForLabel(
     return [127, 127, 127];
   }
 
-  return hexToRgb(CATEGORIES[category].color);
-}
-
-function componentIdForDisplayLabel(label: number, visualization: VolumeData["visualization"]): number {
-  if (visualization === "finalCclComponents") {
-    return Math.max(0, label - 3);
-  }
-  return label;
+  const hex = CATEGORIES[category].color.replace("#", "");
+  return [
+    Number.parseInt(hex.slice(0, 2), 16),
+    Number.parseInt(hex.slice(2, 4), 16),
+    Number.parseInt(hex.slice(4, 6), 16),
+  ];
 }
 
 function componentColor(label: number): [number, number, number] {
   const seed = Math.abs(Math.trunc(label));
   const hue = ((seed * 137.508) % 360) / 360;
-  const [r, g, b] = hslToRgb(hue, schemaSaturation(label), 0.57);
+  const [r, g, b] = hslToRgb(hue, 0.68, 0.57);
   return [
     Math.round(r * 255),
     Math.round(g * 255),
     Math.round(b * 255),
   ];
-}
-
-function schemaSaturation(label: number): number {
-  return Number.isFinite(label) ? 0.68 : 0;
 }
 
 function hslToRgb(h: number, s: number, l: number): [number, number, number] {
@@ -1142,15 +1082,6 @@ function hueToRgb(p: number, q: number, t: number): number {
     return p + (q - p) * (2 / 3 - value) * 6;
   }
   return p;
-}
-
-function hexToRgb(hex: string): [number, number, number] {
-  const normalized = hex.replace("#", "");
-  return [
-    Number.parseInt(normalized.slice(0, 2), 16),
-    Number.parseInt(normalized.slice(2, 4), 16),
-    Number.parseInt(normalized.slice(4, 6), 16),
-  ];
 }
 
 function indexToWorld(index: number, dimension: number): number {
@@ -1197,39 +1128,12 @@ function isLineMaterial(material: THREE.Material | THREE.Material[]): material i
   return !Array.isArray(material);
 }
 
-function formatVector(vector: THREE.Vector3): string {
-  return `[${vector.x.toFixed(4)}, ${vector.y.toFixed(4)}, ${vector.z.toFixed(4)}]`;
-}
-
-function formatLabel(label: number): string {
-  return Number.isInteger(label) ? String(label) : label.toFixed(4);
-}
-
-function formatDisplayLabel(label: number, visualization: VolumeData["visualization"]): string {
-  if (visualization === "finalCclComponents" && label > 3) {
-    return `component ${formatLabel(label - 3)}`;
-  }
-  if (visualization === "finalCclCases") {
-    const category = classifyVolumeLabel(label, visualization);
-    return category ? `${formatLabel(label)} ${categoryDisplayName(category)}` : formatLabel(label);
-  }
-  return formatLabel(label);
-}
-
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
-}
-
-function mustGetContext(canvas: HTMLCanvasElement): CanvasRenderingContext2D {
-  const context = canvas.getContext("2d", { alpha: false });
-  if (!context) {
-    throw new Error("Could not create a 2D canvas context.");
-  }
-  return context;
 }
 
 function getElement<T extends HTMLElement>(id: string): T {

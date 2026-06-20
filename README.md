@@ -1,6 +1,6 @@
 # Interactive Mesh Slice Viewer
 
-Client-side Three.js viewer for debugging voxel label slices against mesh geometry in the shared `[-1, 1]^3` coordinate system.
+Client-side Three.js viewer for inspecting pipeline label slices against mesh geometry in the shared `[-1, 1]^3` coordinate system.
 
 ## Run
 
@@ -17,69 +17,65 @@ For a production build:
 npm run build
 ```
 
-## Supported Inputs
+## Input Folder
 
-- Volumes: `.npy`, `.npz`
-- Meshes: `.ply`, `.obj`, `.stl`
+Use the Folder input and select one pipeline output directory. The directory must contain:
 
-Meshes are shown in their source coordinates by default. Enable `Normalize mesh` only when you explicitly want to fit a mesh into the unit coordinate box.
+- `NNN_final_ccl_labels.npy`
+- `NNN_final_ccl_components.npy`
+- `NNN_final_ccl_cases.npy`
+- `voxel_input_mesh.ply`
 
-The UI has two main panes:
+The viewer also loads `MMM_inside_filtered_labels.npy` when it is present, with `MMM = NNN + 1`.
 
-- Left: 3D mesh view with a movable axis-aligned slice plane.
-- Right: 2D color rendering of the label slice at the same plane position.
+The Array dropdown controls which loaded pipeline stage is shown. Volumes are loaded on demand, so switching stages does not keep every `r=512` array in browser memory at the same time.
 
-Drag or scroll the slice plane in the 3D view, or use the slice slider, to move the slice.
+Meshes are rendered in their source coordinates. The viewer does not normalize or remap mesh geometry.
 
-## Label Schemas
+Additional `.ply`, `.obj`, or `.stl` meshes can be added with Add mesh. The mesh visibility bar controls which meshes are visible.
 
-The viewer supports three schema modes:
+## Display
 
-- Pipeline labels: `0` unknown/background, `1` outside, `2` inside, `3` unresolved band, `4` surface barrier, `>=5` CCL components.
-- CCL components: if loaded as a standalone volume, `0` unknown/background and nonzero labels are component ids with deterministic random colors.
-- CCL cases: standalone `*_cases.npy` from the current pipeline is a composite case volume: `0` unknown/background, `1` outside, `2` inside, `3` surface barrier, `4` inside-only case, `5` outside-only case, `6` both-sides case, `7` isolated case.
+- Left: 3D mesh view with an axis-aligned slice plane. The mesh is clipped in Polyscope-style inspection, keeping the positive side of the active slice plane.
+- Right: 2D color rendering of the selected label slice.
 
-If an `.npz` contains `outside` plus optional `inside`, `band`, and `surface_barrier` boolean arrays, the viewer synthesizes a `pipeline_labels` volume using the same constants as the server-side slice visualizer:
-
-```text
-0 UNKNOWN
-1 OUTSIDE
-2 INSIDE
-3 BAND
-4 SURFACE_BARRIER
-```
-
-If an `.npz` contains `outside` plus a raw unresolved-component case-id array named like `component_case` or `component_cases`, the viewer also synthesizes `ccl_cases_overlay`. That view follows the server-side component/case slice renderer:
-
-```text
-unknown background
-inside / outside base colors
-case ids where case > 0
-surface barrier on top
-```
-
-Standalone `*_cases.npy` files already contain the composite CCL case view from the current pipeline. Export an `.npz` with raw masks only when you want the browser to synthesize the same overlay from intermediate arrays. For overlay synthesis, include at least:
-
-```text
-outside
-component_case or component_cases
-```
-
-and preferably:
-
-```text
-inside
-surface_barrier
-```
-
-Slice plane positions are mapped to world space as:
+Voxel grid indices map to world-space voxel centers as:
 
 ```text
 world = -1 + (grid_index + 0.5) * 2 / grid_dimension
 ```
 
-Use the axis order and flip controls when the array axis convention differs from the mesh convention.
+The grid axes map directly to world axes: `[i, j, k] -> [x, y, z]`.
 
-## Performance Controls
+## Label Values
 
-This version does not render 3D label voxels. It renders only one 2D label slice at a time, so `r=512` volumes are handled by updating a `512 x 512` canvas instead of creating hundreds of thousands of 3D voxel boxes.
+`NNN_final_ccl_labels.npy` and `MMM_inside_filtered_labels.npy`:
+
+- `0` unknown/background
+- `1` outside
+- `2` inside
+- `3` unresolved band
+- `4` surface barrier
+
+`NNN_final_ccl_components.npy`:
+
+- `0` unknown/background
+- `1` outside
+- `2` inside
+- `3` surface barrier
+- `>=4` component ids encoded as `component_id + 3`
+
+`NNN_final_ccl_cases.npy`:
+
+- `0` unknown/background
+- `1` outside
+- `2` inside
+- `3` surface barrier
+- `4` inside-only case
+- `5` outside-only case
+- `6` both-sides case
+- `7` isolated case
+
+## Performance
+
+This version does not render 3D label voxels. It renders one label slice at a time, so `r=512` volumes update a `512 x 512` canvas instead of creating voxel geometry.

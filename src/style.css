@@ -58,13 +58,13 @@ select {
 }
 
 input[type="file"] {
-  width: 172px;
-  color: #3d4a5c;
+  width: 96px;
+  color: transparent;
   font-size: 13px;
 }
 
 input[type="file"]::file-selector-button {
-  margin-right: 8px;
+  margin-right: 0;
   border: 1px solid #c9d2df;
   border-radius: 5px;
   background: #ffffff;
@@ -89,25 +89,24 @@ select {
 #app {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
-  min-width: 980px;
+  min-width: 0;
 }
 
 .topbar {
   position: relative;
   z-index: 3;
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(220px, 0.62fr) minmax(0, 1.38fr);
   align-items: center;
-  justify-content: space-between;
-  gap: 18px;
-  min-height: 70px;
-  padding: 12px 16px;
+  gap: 14px 18px;
+  min-height: 78px;
+  padding: 12px 14px;
   border-bottom: 1px solid #d8e1ec;
   background: #fbfcfe;
 }
 
 .brand-block {
-  flex: 0 0 auto;
-  min-width: 220px;
+  min-width: 0;
 }
 
 .brand-block h1 {
@@ -134,14 +133,41 @@ select {
 }
 
 .top-actions {
+  align-items: stretch;
   justify-content: flex-end;
-  flex: 1 1 auto;
+  flex-wrap: wrap;
+}
+
+.control-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.file-group {
+  flex: 1 1 430px;
+  flex-wrap: wrap;
+}
+
+.file-group .file-control {
+  flex: 0 0 auto;
+}
+
+.stage-control {
+  flex: 1 1 320px;
+  width: auto;
+  max-width: 520px;
+}
+
+.action-group {
+  flex: 0 0 auto;
+  justify-content: flex-end;
 }
 
 .file-control,
 .select-control,
-.range-control,
-.checkbox-control {
+.range-control {
   display: flex;
   align-items: center;
   gap: 7px;
@@ -165,8 +191,10 @@ select {
   width: 205px;
 }
 
-.schema-control {
-  width: 185px;
+.select-control.stage-control {
+  flex: 1 1 320px;
+  width: auto;
+  max-width: 520px;
 }
 
 .range-control {
@@ -174,7 +202,9 @@ select {
 }
 
 .slice-range {
-  width: min(480px, 38vw);
+  flex: 1 1 340px;
+  width: min(560px, 46vw);
+  min-width: 260px;
 }
 
 .short-range {
@@ -229,19 +259,6 @@ select {
   box-shadow: 0 16px 42px rgb(15 23 42 / 18%);
 }
 
-.check-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  color: #334155;
-  font-size: 13px;
-}
-
-.check-row label,
-.checkbox-control {
-  white-space: nowrap;
-}
-
 .segmented {
   display: grid;
   grid-template-columns: repeat(3, 38px);
@@ -270,7 +287,7 @@ select {
 
 .mesh-pane {
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr);
 }
 
 .slice-pane {
@@ -283,11 +300,68 @@ select {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 12px;
-  min-height: 48px;
+  min-height: 54px;
   padding: 9px 14px;
   border-bottom: 1px solid #d9e1ea;
   background: rgb(255 255 255 / 88%);
+}
+
+.pane-heading > div:first-child {
+  min-width: 180px;
+}
+
+.slice-controls {
+  flex: 1 1 520px;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+}
+
+.mesh-list {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+  max-height: 96px;
+  padding: 8px 14px;
+  overflow: auto;
+  border-bottom: 1px solid #d9e1ea;
+  background: #f8fafc;
+}
+
+.mesh-list-title {
+  flex: 0 0 auto;
+  color: #526174;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.mesh-list button {
+  padding: 4px 8px;
+  font-size: 12px;
+}
+
+.mesh-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 220px;
+  min-height: 28px;
+  padding: 4px 8px;
+  border: 1px solid #d5deea;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #334155;
+  font-size: 12px;
+}
+
+.mesh-toggle span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .pane-heading h2 {
@@ -422,12 +496,18 @@ select {
 
   .topbar {
     align-items: flex-start;
-    flex-direction: column;
+    grid-template-columns: 1fr;
   }
 
-  .top-actions,
-  .slice-controls {
-    flex-wrap: wrap;
+  .top-actions {
+    justify-content: flex-start;
+    width: 100%;
+  }
+
+  .file-group,
+  .stage-control {
+    flex-basis: 100%;
+    max-width: none;
   }
 
   .workspace {
@@ -438,5 +518,26 @@ select {
   .options-grid {
     left: 0;
     right: auto;
+  }
+}
+
+@media (max-width: 720px) {
+  .file-group .file-control,
+  .stage-control,
+  .select-control,
+  .range-control,
+  .slice-range {
+    flex-basis: 100%;
+    width: 100%;
+    max-width: none;
+  }
+
+  .action-group,
+  .slice-controls {
+    justify-content: flex-start;
+  }
+
+  .options-grid {
+    grid-template-columns: 1fr;
   }
 }

@@ -8,17 +8,13 @@ import { STLLoader } from "three/examples/jsm/loaders/STLLoader.js";
 import {
   CATEGORIES,
   CATEGORY_ORDER,
-  CASE_OVERLAY_OFFSET,
-  COMPONENT_OVERLAY_OFFSET,
   categoryDisplayName,
-  classifyLabel,
-  type AxisOrder,
+  classifyVolumeLabel,
   type CategoryKey,
-  type LabelSchema,
   type SliceAxis,
   type VolumeData,
 } from "./types";
-import { loadVolumeFile } from "./volumeLoader";
+import { parseNpy } from "./volumeLoader";
 
 type MeshMode = "solid" | "wireframe" | "transparent" | "solidWire";
 
@@ -30,28 +26,44 @@ interface SliceSample {
   category: CategoryKey | null;
 }
 
+type PipelineVolumeRole = "label" | "components" | "cases" | "insideFiltered";
+
+interface PipelineFolderSelection {
+  directory: string;
+  volumes: File[];
+  mesh: File;
+}
+
+interface VolumeSlot {
+  name: string;
+  volume?: VolumeData;
+  file?: File;
+}
+
+interface MeshItem {
+  id: number;
+  name: string;
+  object: THREE.Object3D;
+}
+
 class MeshSliceViewer {
   private readonly canvas = getElement<HTMLCanvasElement>("viewerCanvas");
   private readonly sliceCanvas = getElement<HTMLCanvasElement>("sliceCanvas");
   private readonly sliceContext = mustGetContext(this.sliceCanvas);
+  private readonly sliceTexture = new THREE.CanvasTexture(this.sliceCanvas);
   private readonly statusText = getElement<HTMLElement>("statusText");
   private readonly renderStats = getElement<HTMLElement>("renderStats");
-  private readonly volumeInput = getElement<HTMLInputElement>("volumeInput");
+  private readonly folderInput = getElement<HTMLInputElement>("folderInput");
   private readonly meshInput = getElement<HTMLInputElement>("meshInput");
   private readonly arraySelect = getElement<HTMLSelectElement>("arraySelect");
   private readonly arraySelectRow = getElement<HTMLElement>("arraySelectRow");
-  private readonly schemaSelect = getElement<HTMLSelectElement>("schemaSelect");
   private readonly sliceSlider = getElement<HTMLInputElement>("sliceSlider");
   private readonly sliceLabel = getElement<HTMLElement>("sliceLabel");
   private readonly sliceValue = getElement<HTMLOutputElement>("sliceValue");
-  private readonly axisOrderSelect = getElement<HTMLSelectElement>("axisOrderSelect");
-  private readonly flipX = getElement<HTMLInputElement>("flipX");
-  private readonly flipY = getElement<HTMLInputElement>("flipY");
-  private readonly flipZ = getElement<HTMLInputElement>("flipZ");
   private readonly meshModeSelect = getElement<HTMLSelectElement>("meshModeSelect");
   private readonly meshOpacity = getElement<HTMLInputElement>("meshOpacity");
   private readonly meshOpacityValue = getElement<HTMLOutputElement>("meshOpacityValue");
-  private readonly normalizeMesh = getElement<HTMLInputElement>("normalizeMesh");
+  private readonly meshList = getElement<HTMLElement>("meshList");
   private readonly legendList = getElement<HTMLElement>("legendList");
   private readonly inspectorList = getElement<HTMLElement>("inspectorList");
 
@@ -59,28 +71,34 @@ class MeshSliceViewer {
   private readonly camera = new THREE.PerspectiveCamera(45, 1, 0.01, 100);
   private readonly renderer = new THREE.WebGLRenderer({ canvas: this.canvas, antialias: true });
   private readonly controls = new OrbitControls(this.camera, this.canvas);
-  private readonly raycaster = new THREE.Raycaster();
-  private readonly pointer = new THREE.Vector2();
   private readonly meshRoot = new THREE.Group();
   private readonly sliceRoot = new THREE.Group();
+  private readonly meshClipPlane = new THREE.Plane(new THREE.Vector3(0, 0, -1), 0);
+  private readonly meshClippingPlanes = [this.meshClipPlane];
+  private readonly slicePlaneMaterial = new THREE.MeshBasicMaterial({
+    color: "#f97316",
+    transparent: true,
+    opacity: 0.22,
+    side: THREE.DoubleSide,
+    depthWrite: false,
+    polygonOffset: true,
+    polygonOffsetFactor: -1,
+    polygonOffsetUnits: -1,
+  });
   private readonly slicePlane = new THREE.Mesh(
     new THREE.PlaneGeometry(2, 2),
-    new THREE.MeshBasicMaterial({
-      color: "#f97316",
-      transparent: true,
-      opacity: 0.22,
-      side: THREE.DoubleSide,
-      depthWrite: false,
-    }),
+    this.slicePlaneMaterial,
   );
 
-  private volumes: VolumeData[] = [];
+  private volumeSlots: VolumeSlot[] = [];
   private activeVolume: VolumeData | null = null;
+  private volumeLoadToken = 0;
+  private currentMeshFiles: File[] = [];
+  private meshItems: MeshItem[] = [];
+  private nextMeshId = 1;
   private sliceAxis: SliceAxis = "z";
   private sliceIndex = 0;
-  private draggingSlice = false;
-  private dragStartPointer = new THREE.Vector2();
-  private dragStartIndex = 0;
+  private slicePlaneHasTexture = false;
 
   constructor() {
     this.scene.background = new THREE.Color("#f3f6fa");
@@ -151,55 +169,39 @@ class MeshSliceViewer {
   private configureRenderer(): void {
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
+    this.renderer.localClippingEnabled = true;
     this.controls.enableDamping = true;
     this.controls.dampingFactor = 0.08;
     this.controls.screenSpacePanning = true;
     this.sliceContext.imageSmoothingEnabled = false;
+    this.sliceTexture.colorSpace = THREE.SRGBColorSpace;
+    this.sliceTexture.magFilter = THREE.NearestFilter;
+    this.sliceTexture.minFilter = THREE.NearestFilter;
+    this.sliceTexture.generateMipmaps = false;
   }
 
   private bindEvents(): void {
     window.addEventListener("resize", () => this.resize());
 
-    this.volumeInput.addEventListener("change", () => void this.loadSelectedVolumeFile());
+    this.folderInput.addEventListener("change", () => void this.loadSelectedPipelineFolder());
     this.meshInput.addEventListener("change", () => void this.loadSelectedMeshFile());
-    this.arraySelect.addEventListener("change", () => this.selectVolume(Number(this.arraySelect.value)));
-    this.schemaSelect.addEventListener("change", () => this.renderSlice());
+    this.arraySelect.addEventListener("change", () => void this.selectVolume(Number(this.arraySelect.value)));
 
     this.sliceSlider.addEventListener("input", () => {
       this.setSliceIndex(Number(this.sliceSlider.value));
     });
-    this.axisOrderSelect.addEventListener("change", () => {
-      this.updateSliceControls(true);
-      this.updateSlicePlane();
-      this.renderSlice();
-    });
-    this.flipX.addEventListener("change", () => {
-      this.setInspector();
-      this.renderSlice();
-    });
-    this.flipY.addEventListener("change", () => {
-      this.setInspector();
-      this.renderSlice();
-    });
-    this.flipZ.addEventListener("change", () => {
-      this.setInspector();
-      this.renderSlice();
-    });
 
     this.meshModeSelect.addEventListener("change", () => this.updateMeshDisplay());
     this.meshOpacity.addEventListener("input", () => this.updateMeshDisplay());
-    this.normalizeMesh.addEventListener("change", () => {
-      if (this.meshInput.files?.[0]) {
-        void this.loadSelectedMeshFile();
-      }
-    });
 
     getElement<HTMLButtonElement>("clearMeshButton").addEventListener("click", () => {
       this.clearGroup(this.meshRoot);
+      this.currentMeshFiles = [];
+      this.meshItems = [];
+      this.renderMeshList();
       this.setStatus("Mesh cleared");
     });
     getElement<HTMLButtonElement>("resetCameraButton").addEventListener("click", () => this.resetCamera());
-    getElement<HTMLButtonElement>("demoButton").addEventListener("click", () => this.loadDemo());
 
     getElement<HTMLElement>("sliceAxisGroup").addEventListener("click", (event) => {
       const target = event.target as HTMLElement;
@@ -220,73 +222,162 @@ class MeshSliceViewer {
       this.renderSlice();
     });
 
-    this.canvas.addEventListener("pointerdown", (event) => this.startSliceDrag(event));
-    this.canvas.addEventListener("pointermove", (event) => this.moveSliceDrag(event));
-    this.canvas.addEventListener("pointerup", () => this.endSliceDrag());
-    this.canvas.addEventListener("pointercancel", () => this.endSliceDrag());
-    this.canvas.addEventListener("wheel", (event) => this.stepSliceFromWheel(event), { passive: false });
     this.sliceCanvas.addEventListener("pointermove", (event) => this.inspectSlicePointer(event));
     this.sliceCanvas.addEventListener("pointerleave", () => this.setInspector());
   }
 
-  private async loadSelectedVolumeFile(): Promise<void> {
-    const file = this.volumeInput.files?.[0];
-    if (!file) {
+  private async loadSelectedPipelineFolder(): Promise<void> {
+    const files = Array.from(this.folderInput.files ?? []);
+    if (files.length === 0) {
       return;
     }
 
     try {
-      this.setStatus(`Loading ${file.name}`);
-      this.volumes = await loadVolumeFile(file);
+      const selection = findPipelineFolderSelection(files);
+      this.setStatus(`Loading folder ${selection.directory || "(selected folder)"}`);
+
+      this.activeVolume = null;
+      this.volumeLoadToken += 1;
+      this.volumeSlots = selection.volumes.map((file) => ({
+        name: file.name,
+        file,
+      }));
       this.populateArraySelect();
-      this.selectVolume(0);
+
+      const caseIndex = this.volumeSlots.findIndex((slot) => slot.name.toLowerCase().includes("cases"));
+      this.arraySelect.value = String(caseIndex >= 0 ? caseIndex : 0);
+      await this.loadMeshFiles([selection.mesh], { replace: true });
+      await this.selectVolume(caseIndex >= 0 ? caseIndex : 0, true);
+      this.setStatus(
+        `Folder ${selection.directory || "(selected folder)"} loaded: ${selection.volumes.map((file) => file.name).join(", ")} and ${selection.mesh.name}`,
+      );
     } catch (error) {
       this.setStatus(errorMessage(error));
     }
   }
 
   private populateArraySelect(): void {
+    const selectedValue = this.arraySelect.value;
     this.arraySelect.replaceChildren();
 
-    this.volumes.forEach((volume, index) => {
+    this.volumeSlots.forEach((slot, index) => {
       const option = document.createElement("option");
       option.value = String(index);
-      option.textContent = `${volume.name} (${volume.shape.join(" x ")})`;
+      option.textContent = slot.volume
+        ? `${slot.name} (${slot.volume.shape.join(" x ")})`
+        : `${slot.name} (load on select)`;
       this.arraySelect.append(option);
     });
 
-    this.arraySelectRow.classList.toggle("hidden", this.volumes.length <= 1);
+    if (this.volumeSlots.length > 0) {
+      const selectedIndex = Number(selectedValue);
+      this.arraySelect.value = Number.isInteger(selectedIndex) && selectedIndex >= 0 && selectedIndex < this.volumeSlots.length
+        ? selectedValue
+        : "0";
+    }
+
+    this.arraySelectRow.classList.toggle("hidden", this.volumeSlots.length <= 1);
   }
 
-  private selectVolume(index: number): void {
-    const volume = this.volumes[index];
-    if (!volume) {
+  private async selectVolume(index: number, resetSlice = false): Promise<void> {
+    const slot = this.volumeSlots[index];
+    if (!slot) {
       return;
     }
 
-    this.activeVolume = volume;
-    this.schemaSelect.value = inferSchemaForVolume(volume);
-    this.updateSliceControls(true);
-    this.updateSlicePlane();
-    this.renderSlice();
-    const warnings = volume.warnings.length ? ` ${volume.warnings.join(" ")}` : "";
-    this.setStatus(`Volume ${volume.name}: ${volume.shape.join(" x ")} ${volume.dtype}.${warnings}`);
+    const token = ++this.volumeLoadToken;
+
+    try {
+      this.releaseDeferredVolumesExcept(index);
+
+      if (!slot.volume) {
+        if (!slot.file) {
+          throw new Error(`Volume ${slot.name} is not available.`);
+        }
+
+        this.activeVolume = null;
+        this.setStatus(`Loading ${slot.file.name}`);
+        await yieldToBrowser();
+        const volume = parseNpy(await slot.file.arrayBuffer(), slot.file.name);
+        if (token !== this.volumeLoadToken) {
+          return;
+        }
+        slot.volume = volume;
+        slot.name = volume.name;
+        await yieldToBrowser();
+      }
+
+      this.activeVolume = slot.volume;
+      this.arraySelect.value = String(index);
+      this.populateArraySelect();
+      this.arraySelect.value = String(index);
+      this.updateSliceControls(resetSlice);
+      this.updateSlicePlane();
+      this.renderSlice();
+      const warnings = slot.volume.warnings.length ? ` ${slot.volume.warnings.join(" ")}` : "";
+      this.setStatus(`Volume ${slot.volume.name}: ${slot.volume.shape.join(" x ")} ${slot.volume.dtype}.${warnings}`);
+    } catch (error) {
+      if (token === this.volumeLoadToken) {
+        this.setStatus(errorMessage(error));
+      }
+    }
+  }
+
+  private releaseDeferredVolumesExcept(index: number): void {
+    for (let slotIndex = 0; slotIndex < this.volumeSlots.length; slotIndex += 1) {
+      if (slotIndex !== index && this.volumeSlots[slotIndex].file) {
+        this.volumeSlots[slotIndex].volume = undefined;
+      }
+    }
   }
 
   private async loadSelectedMeshFile(): Promise<void> {
-    const file = this.meshInput.files?.[0];
-    if (!file) {
+    const files = Array.from(this.meshInput.files ?? []);
+    if (files.length === 0) {
       return;
     }
 
     try {
-      this.setStatus(`Loading mesh ${file.name}`);
-      const object = await this.parseMesh(file);
-      this.setMeshObject(object, file.name);
-      this.setStatus(`Mesh ${file.name} loaded`);
+      await this.loadMeshFiles(files, { replace: false });
+      this.meshInput.value = "";
     } catch (error) {
       this.setStatus(errorMessage(error));
     }
+  }
+
+  private async loadMeshFiles(files: File[], options: { replace: boolean; visibility?: boolean[] }): Promise<void> {
+    const filesToLoad = [...files];
+    const visibility = options.visibility ?? [];
+
+    if (options.replace) {
+      this.clearGroup(this.meshRoot);
+      this.currentMeshFiles = [];
+      this.meshItems = [];
+      this.renderMeshList();
+    }
+
+    for (const [index, file] of filesToLoad.entries()) {
+      this.setStatus(`Loading mesh ${file.name}`);
+      const object = await this.parseMesh(file);
+      this.currentMeshFiles.push(file);
+      const root = this.addMeshObject(object, file.name, visibility[index] ?? true);
+      this.meshItems.push({
+        id: this.nextMeshId,
+        name: file.name,
+        object: root,
+      });
+      this.nextMeshId += 1;
+      this.renderMeshList();
+      await yieldToBrowser();
+    }
+
+    const loadedCount = filesToLoad.length;
+    const totalCount = this.currentMeshFiles.length;
+    this.setStatus(
+      loadedCount === totalCount
+        ? `Loaded ${totalCount} mesh${totalCount === 1 ? "" : "es"}`
+        : `Added ${loadedCount} mesh${loadedCount === 1 ? "" : "es"} (${totalCount} total)`,
+    );
   }
 
   private async parseMesh(file: File): Promise<THREE.Object3D> {
@@ -311,13 +402,65 @@ class MeshSliceViewer {
     throw new Error("Unsupported mesh format. Use .ply, .obj, or .stl.");
   }
 
-  private setMeshObject(object: THREE.Object3D, name: string): void {
-    this.clearGroup(this.meshRoot);
-    const root = this.normalizeMesh.checked ? normalizeIntoUnitBox(object) : object;
-    root.name = name;
-    this.prepareMeshObject(root);
-    this.meshRoot.add(root);
+  private addMeshObject(object: THREE.Object3D, name: string, visible = true): THREE.Object3D {
+    object.name = name;
+    object.visible = visible;
+    this.prepareMeshObject(object);
+    this.meshRoot.add(object);
+    this.updateMeshClipping();
     this.updateMeshDisplay();
+    return object;
+  }
+
+  private renderMeshList(): void {
+    this.meshList.replaceChildren();
+    this.meshList.classList.toggle("hidden", this.meshItems.length === 0);
+
+    if (this.meshItems.length === 0) {
+      return;
+    }
+
+    const title = document.createElement("span");
+    title.className = "mesh-list-title";
+    title.textContent = "Meshes";
+
+    const allButton = document.createElement("button");
+    allButton.type = "button";
+    allButton.textContent = "All";
+    allButton.addEventListener("click", () => this.setAllMeshesVisible(true));
+
+    const noneButton = document.createElement("button");
+    noneButton.type = "button";
+    noneButton.textContent = "None";
+    noneButton.addEventListener("click", () => this.setAllMeshesVisible(false));
+
+    this.meshList.append(title, allButton, noneButton);
+
+    for (const item of this.meshItems) {
+      const label = document.createElement("label");
+      label.className = "mesh-toggle";
+
+      const input = document.createElement("input");
+      input.type = "checkbox";
+      input.checked = item.object.visible;
+      input.addEventListener("change", () => {
+        item.object.visible = input.checked;
+      });
+
+      const name = document.createElement("span");
+      name.textContent = item.name;
+      name.title = item.name;
+
+      label.append(input, name);
+      this.meshList.append(label);
+    }
+  }
+
+  private setAllMeshesVisible(visible: boolean): void {
+    for (const item of this.meshItems) {
+      item.object.visible = visible;
+    }
+    this.renderMeshList();
   }
 
   private prepareMeshObject(object: THREE.Object3D): void {
@@ -338,6 +481,7 @@ class MeshSliceViewer {
         transparent: true,
         opacity: Number(this.meshOpacity.value),
         side: THREE.DoubleSide,
+        clippingPlanes: this.meshClippingPlanes,
       });
 
       const edges = new THREE.LineSegments(
@@ -347,6 +491,7 @@ class MeshSliceViewer {
           transparent: true,
           opacity: 0.74,
           depthTest: true,
+          clippingPlanes: this.meshClippingPlanes,
         }),
       );
       edges.name = "wireframe-overlay";
@@ -375,12 +520,17 @@ class MeshSliceViewer {
           material.opacity = opacity;
           material.transparent = opacity < 1 || mode === "transparent";
           material.depthWrite = opacity >= 0.92 && mode !== "transparent";
+          this.setMaterialClipping(material);
           material.needsUpdate = true;
         }
       }
 
       if (isLineSegments(child) && role === "wire") {
         child.visible = mode === "wireframe" || mode === "solidWire";
+        const material = child.material;
+        if (isLineMaterial(material)) {
+          this.setMaterialClipping(material);
+        }
       }
     });
   }
@@ -401,11 +551,13 @@ class MeshSliceViewer {
       return;
     }
 
-    if (resetValue || this.sliceIndex > max) {
+    if (resetValue) {
       this.sliceIndex = Math.floor(max / 2);
-      this.sliceSlider.value = String(this.sliceIndex);
+    } else {
+      this.sliceIndex = clamp(this.sliceIndex, 0, max);
     }
 
+    this.sliceSlider.value = String(this.sliceIndex);
     this.sliceValue.value = String(this.sliceIndex);
   }
 
@@ -436,12 +588,52 @@ class MeshSliceViewer {
 
     if (this.sliceAxis === "x") {
       this.sliceRoot.position.x = position;
-      this.sliceRoot.rotation.y = Math.PI / 2;
+      this.sliceRoot.rotation.y = -Math.PI / 2;
     } else if (this.sliceAxis === "y") {
       this.sliceRoot.position.y = position;
       this.sliceRoot.rotation.x = Math.PI / 2;
     } else {
       this.sliceRoot.position.z = position;
+    }
+
+    this.updateMeshClipping(position);
+  }
+
+  private updateMeshClipping(position = 0): void {
+    if (!this.activeVolume) {
+      this.meshRoot.traverse((child) => {
+        if (isMesh(child) && isMeshMaterial(child.material)) {
+          this.setMaterialClipping(child.material);
+        } else if (isLineSegments(child) && isLineMaterial(child.material)) {
+          this.setMaterialClipping(child.material);
+        }
+      });
+      return;
+    }
+
+    if (this.sliceAxis === "x") {
+      this.meshClipPlane.normal.set(-1, 0, 0);
+    } else if (this.sliceAxis === "y") {
+      this.meshClipPlane.normal.set(0, -1, 0);
+    } else {
+      this.meshClipPlane.normal.set(0, 0, -1);
+    }
+    this.meshClipPlane.constant = position;
+
+    this.meshRoot.traverse((child) => {
+      if (isMesh(child) && isMeshMaterial(child.material)) {
+        this.setMaterialClipping(child.material);
+      } else if (isLineSegments(child) && isLineMaterial(child.material)) {
+        this.setMaterialClipping(child.material);
+      }
+    });
+  }
+
+  private setMaterialClipping(material: THREE.Material): void {
+    const clippingPlanes = this.activeVolume ? this.meshClippingPlanes : null;
+    if (material.clippingPlanes !== clippingPlanes) {
+      material.clippingPlanes = clippingPlanes;
+      material.needsUpdate = true;
     }
   }
 
@@ -451,12 +643,12 @@ class MeshSliceViewer {
       this.clearSliceCanvas("Load a volume to see slice colors");
       this.renderStats.textContent = "No volume loaded";
       this.renderLegend(new Map());
+      this.setSlicePlaneTextureEnabled(false);
       this.setInspector();
       return;
     }
 
     const started = performance.now();
-    const schema = this.schemaSelect.value as LabelSchema;
     const dims = this.getWorldDims();
     const [width, height] = this.getSliceSize(dims);
     const image = this.sliceContext.createImageData(width, height);
@@ -465,16 +657,16 @@ class MeshSliceViewer {
     for (let py = 0; py < height; py += 1) {
       for (let px = 0; px < width; px += 1) {
         const sample = this.sampleSlicePixel(px, py, height);
-        const category = classifyDisplayLabel(sample.label, schema, volume.visualization ?? "raw");
-        const [r, g, b] = colorForLabel(sample.label, category);
+        const display = this.getSampleDisplay(sample);
+        const [r, g, b] = display.color;
         const offset = (py * width + px) * 4;
         image.data[offset] = r;
         image.data[offset + 1] = g;
         image.data[offset + 2] = b;
         image.data[offset + 3] = 255;
 
-        if (category) {
-          counts.set(category, (counts.get(category) ?? 0) + 1);
+        if (display.category) {
+          counts.set(display.category, (counts.get(display.category) ?? 0) + 1);
         }
       }
     }
@@ -483,6 +675,8 @@ class MeshSliceViewer {
     this.sliceCanvas.height = height;
     this.sliceContext.imageSmoothingEnabled = false;
     this.sliceContext.putImageData(image, 0, 0);
+    this.setSlicePlaneTextureEnabled(true);
+    this.sliceTexture.needsUpdate = true;
     this.renderLegend(counts);
 
     const elapsed = performance.now() - started;
@@ -502,6 +696,18 @@ class MeshSliceViewer {
     this.sliceContext.fillText(message, width / 2, height / 2);
   }
 
+  private setSlicePlaneTextureEnabled(enabled: boolean): void {
+    if (this.slicePlaneHasTexture === enabled) {
+      return;
+    }
+
+    this.slicePlaneHasTexture = enabled;
+    this.slicePlaneMaterial.map = enabled ? this.sliceTexture : null;
+    this.slicePlaneMaterial.color.set(enabled ? "#ffffff" : "#f97316");
+    this.slicePlaneMaterial.opacity = enabled ? 0.82 : 0.22;
+    this.slicePlaneMaterial.needsUpdate = true;
+  }
+
   private renderLegend(counts: Map<CategoryKey, number>): void {
     this.legendList.replaceChildren();
     const visibleKeys = CATEGORY_ORDER.filter((key) => (counts.get(key) ?? 0) > 0);
@@ -516,9 +722,6 @@ class MeshSliceViewer {
 
     for (const key of visibleKeys) {
       const definition = CATEGORIES[key];
-      if (!definition.visibleInLegend) {
-        continue;
-      }
 
       const row = document.createElement("div");
       row.className = "legend-row";
@@ -564,12 +767,8 @@ class MeshSliceViewer {
     }
 
     const grid = this.worldIndexToGrid(worldIndex);
-    const label = this.getVolumeValue(grid[0], grid[1], grid[2]);
-    const category = classifyDisplayLabel(
-      label,
-      this.schemaSelect.value as LabelSchema,
-      volume.visualization ?? "raw",
-    );
+    const label = this.getActiveVolumeValue(grid[0], grid[1], grid[2]);
+    const { category } = this.getSampleDisplay({ grid, worldIndex, world: new THREE.Vector3(), label, category: null });
     const world = new THREE.Vector3(
       indexToWorld(worldIndex[0], dims[0]),
       indexToWorld(worldIndex[1], dims[1]),
@@ -577,6 +776,22 @@ class MeshSliceViewer {
     );
 
     return { grid, worldIndex, world, label, category };
+  }
+
+  private getSampleDisplay(sample: SliceSample): {
+    category: CategoryKey | null;
+    color: [number, number, number];
+  } {
+    const volume = this.activeVolume;
+    if (!volume) {
+      return { category: null, color: [127, 127, 127] };
+    }
+
+    const category = classifyVolumeLabel(sample.label, volume.visualization);
+    return {
+      category,
+      color: colorForLabel(sample.label, category, volume.visualization),
+    };
   }
 
   private getSliceSize(dims: [number, number, number]): [number, number] {
@@ -595,94 +810,28 @@ class MeshSliceViewer {
     }
 
     const [nx, ny, nz] = this.activeVolume.shape;
-    return this.axisOrderSelect.value === "xyz" ? [nx, ny, nz] : [nz, ny, nx];
+    return [nx, ny, nz];
   }
 
   private worldIndexToGrid(worldIndex: [number, number, number]): [number, number, number] {
-    const dims = this.getWorldDims();
-    let [x, y, z] = worldIndex;
-
-    if (this.flipX.checked) {
-      x = dims[0] - 1 - x;
-    }
-    if (this.flipY.checked) {
-      y = dims[1] - 1 - y;
-    }
-    if (this.flipZ.checked) {
-      z = dims[2] - 1 - z;
-    }
-
-    if ((this.axisOrderSelect.value as AxisOrder) === "xyz") {
-      return [x, y, z];
-    }
-
-    return [z, y, x];
+    return worldIndex;
   }
 
-  private getVolumeValue(i: number, j: number, k: number): number {
+  private getActiveVolumeValue(i: number, j: number, k: number): number {
     const volume = this.activeVolume;
     if (!volume) {
       return Number.NaN;
     }
 
+    return this.getVolumeValue(volume, i, j, k);
+  }
+
+  private getVolumeValue(volume: VolumeData, i: number, j: number, k: number): number {
     const [nx, ny, nz] = volume.shape;
     const offset = volume.fortranOrder
       ? i + nx * (j + ny * k)
       : k + nz * (j + ny * i);
     return Number(volume.data[offset]);
-  }
-
-  private startSliceDrag(event: PointerEvent): void {
-    if (!this.activeVolume) {
-      return;
-    }
-
-    this.setPointerFromEvent(event);
-    this.raycaster.setFromCamera(this.pointer, this.camera);
-    const hits = this.raycaster.intersectObject(this.slicePlane, true);
-    if (hits.length === 0) {
-      return;
-    }
-
-    this.draggingSlice = true;
-    this.dragStartPointer.set(event.clientX, event.clientY);
-    this.dragStartIndex = this.sliceIndex;
-    this.controls.enabled = false;
-    this.canvas.setPointerCapture(event.pointerId);
-    this.canvas.classList.add("dragging");
-  }
-
-  private moveSliceDrag(event: PointerEvent): void {
-    if (!this.draggingSlice) {
-      return;
-    }
-
-    const dx = event.clientX - this.dragStartPointer.x;
-    const dy = this.dragStartPointer.y - event.clientY;
-    const delta = this.sliceAxis === "x" ? dx : dy;
-    const max = this.getSliceMax();
-    const sensitivity = Math.max(4, Math.min(12, 360 / Math.max(1, max + 1)));
-    this.setSliceIndex(this.dragStartIndex + Math.round(delta / sensitivity));
-  }
-
-  private endSliceDrag(): void {
-    if (!this.draggingSlice) {
-      return;
-    }
-
-    this.draggingSlice = false;
-    this.controls.enabled = true;
-    this.canvas.classList.remove("dragging");
-  }
-
-  private stepSliceFromWheel(event: WheelEvent): void {
-    if (!this.activeVolume) {
-      return;
-    }
-
-    event.preventDefault();
-    const direction = event.deltaY > 0 ? -1 : 1;
-    this.setSliceIndex(this.sliceIndex + direction);
   }
 
   private inspectSlicePointer(event: PointerEvent): void {
@@ -695,19 +844,14 @@ class MeshSliceViewer {
     const px = clamp(Math.floor((event.clientX - rect.left) / rect.width * this.sliceCanvas.width), 0, this.sliceCanvas.width - 1);
     const py = clamp(Math.floor((event.clientY - rect.top) / rect.height * this.sliceCanvas.height), 0, this.sliceCanvas.height - 1);
     const sample = this.sampleSlicePixel(px, py, this.sliceCanvas.height);
-
-    this.setInspector({
+    const values: Record<string, string> = {
       Grid: `[${sample.grid.join(", ")}]`,
       World: formatVector(sample.world),
-      Label: formatDisplayLabel(sample.label, this.activeVolume.visualization ?? "raw"),
+      Label: formatDisplayLabel(sample.label, this.activeVolume.visualization),
       Category: sample.category ? categoryDisplayName(sample.category) : "-",
-    });
-  }
+    };
 
-  private setPointerFromEvent(event: PointerEvent): void {
-    const rect = this.canvas.getBoundingClientRect();
-    this.pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
-    this.pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+    this.setInspector(values);
   }
 
   private setInspector(values?: Record<string, string>): void {
@@ -726,21 +870,6 @@ class MeshSliceViewer {
       dd.textContent = description;
       this.inspectorList.append(dt, dd);
     }
-  }
-
-  private loadDemo(): void {
-    const volume = createDemoVolume();
-    this.volumes = [volume];
-    this.populateArraySelect();
-    this.arraySelect.value = "0";
-    this.schemaSelect.value = "semantic";
-    this.selectVolume(0);
-
-    const sphere = new THREE.Mesh(new THREE.SphereGeometry(0.62, 64, 32));
-    sphere.name = "demo-sphere";
-    this.normalizeMesh.checked = false;
-    this.setMeshObject(sphere, "demo sphere");
-    this.setStatus("Demo volume and mesh loaded");
   }
 
   private resetCamera(): void {
@@ -781,96 +910,174 @@ class MeshSliceViewer {
   }
 }
 
-function createDemoVolume(): VolumeData {
-  const size = 96;
-  const data = new Uint8Array(size * size * size);
-  const cell = 2 / size;
-  const radius = 0.62;
-  const bandWidth = 0.16;
+interface PipelineFolderCandidate {
+  directory: string;
+  prefix: string;
+  label?: File;
+  components?: File;
+  cases?: File;
+  insideFiltered?: File;
+}
 
-  for (let i = 0; i < size; i += 1) {
-    const x = -1 + (i + 0.5) * cell;
-    for (let j = 0; j < size; j += 1) {
-      const y = -1 + (j + 0.5) * cell;
-      for (let k = 0; k < size; k += 1) {
-        const z = -1 + (k + 0.5) * cell;
-        const distance = Math.hypot(x, y, z);
-        const offset = k + size * (j + size * i);
+function findPipelineFolderSelection(files: File[]): PipelineFolderSelection {
+  const candidates = new Map<string, PipelineFolderCandidate>();
+  const meshes = new Map<string, File>();
 
-        if (Math.abs(distance - radius) < cell * 0.85) {
-          data[offset] = 4;
-        } else if (Math.abs(distance - radius) < bandWidth && x > -0.18) {
-          data[offset] = 3;
-        } else if (distance < radius) {
-          data[offset] = 2;
-        } else {
-          data[offset] = 1;
-        }
-      }
+  for (const file of files) {
+    const { directory, name } = splitFilePath(getFileRelativePath(file));
+    const lowerName = name.toLowerCase();
+
+    if (lowerName === "voxel_input_mesh.ply") {
+      meshes.set(directory, file);
+      continue;
     }
+
+    const parsed = parsePipelineNpyFileName(name);
+    if (!parsed) {
+      continue;
+    }
+
+    const { prefix, role } = parsed;
+    const key = `${directory}\u0000${prefix}`;
+    const candidate = candidates.get(key) ?? { directory, prefix };
+    if (role === "components") {
+      candidate.components = file;
+    } else if (role === "cases") {
+      candidate.cases = file;
+    } else if (role === "insideFiltered") {
+      candidate.insideFiltered = file;
+    } else {
+      candidate.label = file;
+    }
+    candidates.set(key, candidate);
+  }
+
+  const available = Array.from(candidates.values());
+
+  if (available.length === 0) {
+    throw new Error(
+      "No pipeline debug .npy files were found. Expected files generated by --save-debug-volumes, such as NNN_final_ccl_labels.npy, NNN_final_ccl_components.npy, and NNN_final_ccl_cases.npy.",
+    );
+  }
+
+  const completeCandidates = available.filter(hasRequiredPipelineVolumes);
+  if (completeCandidates.length === 0) {
+    const first = available[0];
+    throw new Error(
+      `Missing required final CCL volumes in ${first.directory || "(selected folder)"} for prefix ${first.prefix}: ${missingRequiredPipelineVolumes(first).join(", ")}.`,
+    );
+  }
+
+  const completeWithMesh = completeCandidates.filter((candidate) => meshes.has(candidate.directory));
+  if (completeWithMesh.length === 0) {
+    throw new Error("Found the required final CCL .npy files, but voxel_input_mesh.ply was not found in the same folder.");
+  }
+
+  if (completeWithMesh.length > 1) {
+    throw new Error("Multiple pipeline output candidates were selected. Select one output folder containing a single final CCL prefix.");
+  }
+
+  const selected = completeWithMesh[0];
+  const mesh = meshes.get(selected.directory);
+  if (!mesh) {
+    throw new Error(`Found ${selected.prefix}*.npy in ${selected.directory || "(selected folder)"}, but the mesh could not be opened.`);
   }
 
   return {
-    name: "demo_pipeline_labels",
-    shape: [size, size, size],
-    sourceShape: [size, size, size],
-    data,
-    dtype: "|u1",
-    fortranOrder: false,
-    warnings: [],
+    directory: selected.directory,
+    volumes: volumeFilesForCandidate(selected),
+    mesh,
   };
 }
 
-function normalizeIntoUnitBox(object: THREE.Object3D): THREE.Object3D {
-  const box = new THREE.Box3().setFromObject(object);
-  const size = box.getSize(new THREE.Vector3());
-  const center = box.getCenter(new THREE.Vector3());
-  const maxDimension = Math.max(size.x, size.y, size.z);
-
-  if (!Number.isFinite(maxDimension) || maxDimension <= 0) {
-    return object;
+function parsePipelineNpyFileName(name: string): { prefix: string; role: PipelineVolumeRole } | null {
+  const finalMatch = /^(\d{3})_final_ccl_(labels|components|cases)\.npy$/i.exec(name);
+  if (finalMatch) {
+    const roleBySuffix: Record<string, PipelineVolumeRole> = {
+      labels: "label",
+      components: "components",
+      cases: "cases",
+    };
+    return {
+      prefix: finalMatch[1],
+      role: roleBySuffix[finalMatch[2].toLowerCase()],
+    };
   }
 
-  const wrapper = new THREE.Group();
-  object.position.sub(center);
-  wrapper.scale.setScalar(2 / maxDimension);
-  wrapper.add(object);
-  return wrapper;
+  const auditMatch = /^(\d{3})_inside_filtered_labels\.npy$/i.exec(name);
+  if (auditMatch) {
+    const auditStep = Number(auditMatch[1]);
+    if (!Number.isInteger(auditStep) || auditStep <= 0) {
+      return null;
+    }
+    return {
+      prefix: String(auditStep - 1).padStart(3, "0"),
+      role: "insideFiltered",
+    };
+  }
+
+  return null;
 }
 
-function classifyDisplayLabel(
+function volumeFilesForCandidate(candidate: PipelineFolderCandidate): File[] {
+  const files: File[] = [];
+  if (candidate.label) {
+    files.push(candidate.label);
+  }
+  if (candidate.components) {
+    files.push(candidate.components);
+  }
+  if (candidate.cases) {
+    files.push(candidate.cases);
+  }
+  if (candidate.insideFiltered) {
+    files.push(candidate.insideFiltered);
+  }
+  return files;
+}
+
+function hasRequiredPipelineVolumes(candidate: PipelineFolderCandidate): boolean {
+  return Boolean(candidate.label && candidate.components && candidate.cases);
+}
+
+function missingRequiredPipelineVolumes(candidate: PipelineFolderCandidate): string[] {
+  const missing: string[] = [];
+  if (!candidate.label) {
+    missing.push(`${candidate.prefix}_final_ccl_labels.npy`);
+  }
+  if (!candidate.components) {
+    missing.push(`${candidate.prefix}_final_ccl_components.npy`);
+  }
+  if (!candidate.cases) {
+    missing.push(`${candidate.prefix}_final_ccl_cases.npy`);
+  }
+  return missing;
+}
+
+function getFileRelativePath(file: File): string {
+  return (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name;
+}
+
+function splitFilePath(path: string): { directory: string; name: string } {
+  const parts = path.split("/").filter(Boolean);
+  const name = parts.pop() ?? path;
+  return {
+    directory: parts.join("/"),
+    name,
+  };
+}
+
+function yieldToBrowser(): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, 0));
+}
+
+function colorForLabel(
   label: number,
-  schema: LabelSchema,
+  category: CategoryKey | null,
   visualization: VolumeData["visualization"],
-): CategoryKey | null {
-  if (!Number.isFinite(label)) {
-    return null;
-  }
-
-  if (visualization === "caseOverlay") {
-    if (label >= CASE_OVERLAY_OFFSET) {
-      return caseIdToCategory(label - CASE_OVERLAY_OFFSET);
-    }
-    return classifyLabel(label, "semantic");
-  }
-
-  if (visualization === "componentOverlay") {
-    if (label >= COMPONENT_OVERLAY_OFFSET) {
-      return "components";
-    }
-    return classifyLabel(label, "semantic");
-  }
-
-  return classifyLabel(label, schema);
-}
-
-function colorForLabel(label: number, category: CategoryKey | null): [number, number, number] {
+): [number, number, number] {
   if (category === "components") {
-    const componentId = label >= CASE_OVERLAY_OFFSET
-      ? label - CASE_OVERLAY_OFFSET
-      : label >= COMPONENT_OVERLAY_OFFSET
-        ? label - COMPONENT_OVERLAY_OFFSET
-        : label;
+    const componentId = componentIdForDisplayLabel(label, visualization);
     return componentColor(componentId);
   }
 
@@ -881,40 +1088,11 @@ function colorForLabel(label: number, category: CategoryKey | null): [number, nu
   return hexToRgb(CATEGORIES[category].color);
 }
 
-function caseIdToCategory(caseId: number): CategoryKey {
-  switch (Math.trunc(caseId)) {
-    case 1:
-      return "insideOnly";
-    case 2:
-      return "outsideOnly";
-    case 3:
-      return "bothSides";
-    case 4:
-      return "isolated";
-    default:
-      return "components";
+function componentIdForDisplayLabel(label: number, visualization: VolumeData["visualization"]): number {
+  if (visualization === "finalCclComponents") {
+    return Math.max(0, label - 3);
   }
-}
-
-function inferSchemaForVolume(volume: VolumeData): LabelSchema {
-  if (volume.visualization === "caseOverlay") {
-    return "cases";
-  }
-  if (volume.visualization === "componentOverlay") {
-    return "components";
-  }
-  if (volume.visualization === "pipelineLabels") {
-    return "semantic";
-  }
-
-  const lowerName = volume.name.toLowerCase();
-  if (lowerName.includes("case")) {
-    return "cases";
-  }
-  if (lowerName.includes("component") || lowerName.includes("ccl")) {
-    return "components";
-  }
-  return "semantic";
+  return label;
 }
 
 function componentColor(label: number): [number, number, number] {
@@ -1015,6 +1193,10 @@ function isMeshMaterial(material: THREE.Material | THREE.Material[]): material i
   return !Array.isArray(material) && "opacity" in material;
 }
 
+function isLineMaterial(material: THREE.Material | THREE.Material[]): material is THREE.LineBasicMaterial {
+  return !Array.isArray(material);
+}
+
 function formatVector(vector: THREE.Vector3): string {
   return `[${vector.x.toFixed(4)}, ${vector.y.toFixed(4)}, ${vector.z.toFixed(4)}]`;
 }
@@ -1024,11 +1206,12 @@ function formatLabel(label: number): string {
 }
 
 function formatDisplayLabel(label: number, visualization: VolumeData["visualization"]): string {
-  if (visualization === "caseOverlay" && label >= CASE_OVERLAY_OFFSET) {
-    return `case ${formatLabel(label - CASE_OVERLAY_OFFSET)}`;
+  if (visualization === "finalCclComponents" && label > 3) {
+    return `component ${formatLabel(label - 3)}`;
   }
-  if (visualization === "componentOverlay" && label >= COMPONENT_OVERLAY_OFFSET) {
-    return `component ${formatLabel(label - COMPONENT_OVERLAY_OFFSET)}`;
+  if (visualization === "finalCclCases") {
+    const category = classifyVolumeLabel(label, visualization);
+    return category ? `${formatLabel(label)} ${categoryDisplayName(category)}` : formatLabel(label);
   }
   return formatLabel(label);
 }

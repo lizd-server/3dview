@@ -26,7 +26,10 @@ Use the Folder input and select one pipeline output directory. The directory mus
 - `NNN_final_ccl_cases.npy`
 - `voxel_input_mesh.ply`
 
-The viewer also loads `MMM_inside_filtered_labels.npy` when it is present, with `MMM = NNN + 1`.
+The viewer also loads optional later-stage label volumes when they are present:
+
+- `MMM_inside_filtered_labels.npy`, with `MMM = NNN + 1`
+- `KKK_boundary_voted_labels.npy`, with `KKK = NNN + 2`
 
 The Array dropdown controls which loaded pipeline stage is shown. Volumes are loaded on demand, so switching stages does not keep every `r=512` array in browser memory at the same time.
 
@@ -39,17 +42,22 @@ Additional `.ply`, `.obj`, or `.stl` meshes can be added with Add mesh. The mesh
 - Left: 3D mesh view with an axis-aligned slice plane. The mesh is clipped in Polyscope-style inspection, keeping the positive side of the active slice plane.
 - Right: 2D color rendering of the selected label slice.
 
-Voxel grid indices map to world-space voxel centers as:
+The slice renderer has two modes:
+
+- Pixels: each grid point is drawn as one image pixel.
+- Corner dots: each grid point is drawn as a small circle at its grid-node position. The 3D slice plane uses a transparent dot texture, and the right-side slice panel uses a scrollable dot canvas. For `r=512`, the right-side canvas is about `2053 x 2053`.
+
+Pipeline label arrays are sampled on grid nodes, not cell centers. Grid indices map to world space as:
 
 ```text
-world = -1 + (grid_index + 0.5) * 2 / grid_dimension
+world = -1 + grid_index * 2 / (grid_dimension - 1)
 ```
 
 The grid axes map directly to world axes: `[i, j, k] -> [x, y, z]`.
 
 ## Label Values
 
-`NNN_final_ccl_labels.npy` and `MMM_inside_filtered_labels.npy`:
+`NNN_final_ccl_labels.npy`, `MMM_inside_filtered_labels.npy`, and `KKK_boundary_voted_labels.npy`:
 
 - `0` unknown/background
 - `1` outside
@@ -78,4 +86,4 @@ The grid axes map directly to world axes: `[i, j, k] -> [x, y, z]`.
 
 ## Performance
 
-This version does not render 3D label voxels. It renders one label slice at a time, so `r=512` volumes update a `512 x 512` canvas instead of creating voxel geometry.
+This version does not render 3D label voxels. It renders one label slice at a time, so an `r=512` pipeline output updates a `513 x 513` canvas instead of creating voxel geometry.

@@ -17,6 +17,22 @@ import {
 import { parseNpy } from "./volumeLoader";
 
 type MeshMode = "solid" | "wireframe" | "transparent" | "solidWire";
+type SliceRenderMode = "pixels" | "cornerDots";
+
+const DOT_SPACING = 4;
+const DOT_RADIUS = 1.5;
+const DOT_MARGIN = 3;
+const DOT_BACKGROUND: [number, number, number] = [238, 242, 247];
+const DOT_STAMP: Array<{ dx: number; dy: number; alpha: number }> = [];
+for (let dy = -2; dy <= 2; dy += 1) {
+  for (let dx = -2; dx <= 2; dx += 1) {
+    const distance = Math.hypot(dx, dy);
+    const alpha = clamp(DOT_RADIUS + 0.5 - distance, 0, 1);
+    if (alpha > 0) {
+      DOT_STAMP.push({ dx, dy, alpha });
+    }
+  }
+}
 
 interface SliceSample {
   grid: [number, number, number];
@@ -26,7 +42,7 @@ interface SliceSample {
   category: CategoryKey | null;
 }
 
-type PipelineVolumeRole = "label" | "components" | "cases" | "insideFiltered";
+type PipelineVolumeRole = "label" | "components" | "cases" | "insideFiltered" | "boundaryVoted";
 
 interface PipelineFolderSelection {
   directory: string;
@@ -50,7 +66,9 @@ class MeshSliceViewer {
   private readonly canvas = getElement<HTMLCanvasElement>("viewerCanvas");
   private readonly sliceCanvas = getElement<HTMLCanvasElement>("sliceCanvas");
   private readonly sliceContext: CanvasRenderingContext2D;
-  private readonly sliceTexture = new THREE.CanvasTexture(this.sliceCanvas);
+  private readonly sliceTextureCanvas = document.createElement("canvas");
+  private readonly sliceTextureContext: CanvasRenderingContext2D;
+  private readonly sliceTexture = new THREE.CanvasTexture(this.sliceTextureCanvas);
   private readonly statusText = getElement<HTMLElement>("statusText");
   private readonly renderStats = getElement<HTMLElement>("renderStats");
   private readonly folderInput = getElement<HTMLInputElement>("folderInput");
@@ -60,6 +78,7 @@ class MeshSliceViewer {
   private readonly sliceSlider = getElement<HTMLInputElement>("sliceSlider");
   private readonly sliceLabel = getElement<HTMLElement>("sliceLabel");
   private readonly sliceValue = getElement<HTMLOutputElement>("sliceValue");
+  private readonly sliceRenderMode = getElement<HTMLSelectElement>("sliceRenderMode");
   private readonly meshModeSelect = getElement<HTMLSelectElement>("meshModeSelect");
   private readonly meshOpacity = getElement<HTMLInputElement>("meshOpacity");
   private readonly meshOpacityValue = getElement<HTMLOutputElement>("meshOpacityValue");
@@ -99,6 +118,8 @@ class MeshSliceViewer {
   private sliceAxis: SliceAxis = "z";
   private sliceIndex = 0;
   private slicePlaneHasTexture = false;
+  private lastSliceRenderMode: SliceRenderMode = "pixels";
+  private lastDotCanvasSize = "";
 
   constructor() {
     const sliceContext = this.sliceCanvas.getContext("2d", { alpha: false });
@@ -106,6 +127,11 @@ class MeshSliceViewer {
       throw new Error("Could not create a 2D canvas context.");
     }
     this.sliceContext = sliceContext;
+    const sliceTextureContext = this.sliceTextureCanvas.getContext("2d", { alpha: true });
+    if (!sliceTextureContext) {
+      throw new Error("Could not create a texture canvas context.");
+    }
+    this.sliceTextureContext = sliceTextureContext;
 
     this.scene.background = new THREE.Color("#f3f6fa");
     this.scene.add(this.meshRoot, this.sliceRoot);
@@ -192,6 +218,10 @@ class MeshSliceViewer {
     this.folderInput.addEventListener("change", () => void this.loadSelectedPipelineFolder());
     this.meshInput.addEventListener("change", () => void this.loadSelectedMeshFile());
     this.arraySelect.addEventListener("change", () => void this.selectVolume(Number(this.arraySelect.value)));
+    this.sliceRenderMode.addEventListener("change", () => {
+      this.setInspector();
+      this.renderSlice();
+    });
 
     this.sliceSlider.addEventListener("input", () => {
       this.setSliceIndex(Number(this.sliceSlider.value));
@@ -652,8 +682,10 @@ class MeshSliceViewer {
       : this.sliceAxis === "y"
         ? [dims[0], dims[2]]
         : [dims[0], dims[1]];
-    const image = this.sliceContext.createImageData(width, height);
     const counts = new Map<CategoryKey, number>();
+    const renderMode = this.sliceRenderMode.value as SliceRenderMode;
+    const cornerDotMode = renderMode === "cornerDots";
+    const compactImage = this.sliceContext.createImageData(width, height);
 
     for (let py = 0; py < height; py += 1) {
       for (let px = 0; px < width; px += 1) {
@@ -661,10 +693,10 @@ class MeshSliceViewer {
         const display = this.getSampleDisplay(sample);
         const [r, g, b] = display.color;
         const offset = (py * width + px) * 4;
-        image.data[offset] = r;
-        image.data[offset + 1] = g;
-        image.data[offset + 2] = b;
-        image.data[offset + 3] = 255;
+        compactImage.data[offset] = r;
+        compactImage.data[offset + 1] = g;
+        compactImage.data[offset + 2] = b;
+        compactImage.data[offset + 3] = 255;
 
         if (display.category) {
           counts.set(display.category, (counts.get(display.category) ?? 0) + 1);
@@ -672,16 +704,120 @@ class MeshSliceViewer {
       }
     }
 
-    this.sliceCanvas.width = width;
-    this.sliceCanvas.height = height;
-    this.sliceContext.imageSmoothingEnabled = false;
-    this.sliceContext.putImageData(image, 0, 0);
+    if (cornerDotMode) {
+      const textureWidth = Math.max(1, (width - 1) * DOT_SPACING + 1);
+      const textureHeight = Math.max(1, (height - 1) * DOT_SPACING + 1);
+      const textureImage = this.sliceTextureContext.createImageData(textureWidth, textureHeight);
+
+      for (let py = 0; py < height; py += 1) {
+        for (let px = 0; px < width; px += 1) {
+          const compactOffset = (py * width + px) * 4;
+          const r = compactImage.data[compactOffset];
+          const g = compactImage.data[compactOffset + 1];
+          const b = compactImage.data[compactOffset + 2];
+          const centerX = px * DOT_SPACING;
+          const centerY = py * DOT_SPACING;
+
+          for (const { dx, dy, alpha } of DOT_STAMP) {
+            const x = centerX + dx;
+            const y = centerY + dy;
+            if (x < 0 || y < 0 || x >= textureWidth || y >= textureHeight) {
+              continue;
+            }
+
+            const offset = (y * textureWidth + x) * 4;
+            textureImage.data[offset] = r;
+            textureImage.data[offset + 1] = g;
+            textureImage.data[offset + 2] = b;
+            textureImage.data[offset + 3] = Math.round(255 * alpha);
+          }
+        }
+      }
+
+      this.sliceTextureCanvas.width = textureWidth;
+      this.sliceTextureCanvas.height = textureHeight;
+      this.sliceTextureContext.imageSmoothingEnabled = true;
+      this.sliceTextureContext.putImageData(textureImage, 0, 0);
+      this.sliceTexture.magFilter = THREE.LinearFilter;
+      this.sliceTexture.minFilter = THREE.LinearFilter;
+    } else {
+      this.sliceTextureCanvas.width = width;
+      this.sliceTextureCanvas.height = height;
+      this.sliceTextureContext.imageSmoothingEnabled = false;
+      this.sliceTextureContext.putImageData(compactImage, 0, 0);
+      this.sliceTexture.magFilter = THREE.NearestFilter;
+      this.sliceTexture.minFilter = THREE.NearestFilter;
+    }
+
+    let shouldCenterDotCanvas = false;
+    if (cornerDotMode) {
+      const canvasWidth = DOT_MARGIN * 2 + Math.max(0, width - 1) * DOT_SPACING + 1;
+      const canvasHeight = DOT_MARGIN * 2 + Math.max(0, height - 1) * DOT_SPACING + 1;
+      const image = this.sliceContext.createImageData(canvasWidth, canvasHeight);
+      const dotCanvasSize = `${canvasWidth}x${canvasHeight}`;
+      shouldCenterDotCanvas = this.lastSliceRenderMode !== renderMode || this.lastDotCanvasSize !== dotCanvasSize;
+      this.lastDotCanvasSize = dotCanvasSize;
+
+      for (let offset = 0; offset < image.data.length; offset += 4) {
+        image.data[offset] = DOT_BACKGROUND[0];
+        image.data[offset + 1] = DOT_BACKGROUND[1];
+        image.data[offset + 2] = DOT_BACKGROUND[2];
+        image.data[offset + 3] = 255;
+      }
+
+      for (let py = 0; py < height; py += 1) {
+        for (let px = 0; px < width; px += 1) {
+          const compactOffset = (py * width + px) * 4;
+          const r = compactImage.data[compactOffset];
+          const g = compactImage.data[compactOffset + 1];
+          const b = compactImage.data[compactOffset + 2];
+          const centerX = DOT_MARGIN + px * DOT_SPACING;
+          const centerY = DOT_MARGIN + py * DOT_SPACING;
+
+          for (const { dx, dy, alpha } of DOT_STAMP) {
+            const x = centerX + dx;
+            const y = centerY + dy;
+            const offset = (y * canvasWidth + x) * 4;
+            const inverseAlpha = 1 - alpha;
+            image.data[offset] = Math.round(r * alpha + DOT_BACKGROUND[0] * inverseAlpha);
+            image.data[offset + 1] = Math.round(g * alpha + DOT_BACKGROUND[1] * inverseAlpha);
+            image.data[offset + 2] = Math.round(b * alpha + DOT_BACKGROUND[2] * inverseAlpha);
+            image.data[offset + 3] = 255;
+          }
+        }
+      }
+
+      this.sliceCanvas.width = canvasWidth;
+      this.sliceCanvas.height = canvasHeight;
+      this.sliceContext.imageSmoothingEnabled = true;
+      this.sliceContext.putImageData(image, 0, 0);
+      this.renderStats.textContent = `${this.sliceAxis.toUpperCase()}=${this.sliceIndex}, ${width} x ${height} points, ${canvasWidth} x ${canvasHeight}, ${(performance.now() - started).toFixed(1)} ms`;
+    } else {
+      this.sliceCanvas.width = width;
+      this.sliceCanvas.height = height;
+      this.sliceContext.imageSmoothingEnabled = false;
+      this.sliceContext.putImageData(compactImage, 0, 0);
+      this.renderStats.textContent = `${this.sliceAxis.toUpperCase()}=${this.sliceIndex}, ${width} x ${height}, ${(performance.now() - started).toFixed(1)} ms`;
+    }
+
+    this.sliceCanvas.classList.toggle("corner-dot-mode", cornerDotMode);
+    this.sliceCanvas.parentElement?.classList.toggle("corner-dot-mode", cornerDotMode);
+    if (cornerDotMode && shouldCenterDotCanvas) {
+      const shell = this.sliceCanvas.parentElement;
+      requestAnimationFrame(() => {
+        if (!shell) {
+          return;
+        }
+        shell.scrollLeft = Math.max(0, (this.sliceCanvas.clientWidth - shell.clientWidth) / 2);
+        shell.scrollTop = Math.max(0, (this.sliceCanvas.clientHeight - shell.clientHeight) / 2);
+      });
+    }
+    this.lastSliceRenderMode = renderMode;
     this.setSlicePlaneTextureEnabled(true);
+    this.slicePlaneMaterial.opacity = cornerDotMode ? 1 : 0.82;
+    this.slicePlaneMaterial.needsUpdate = true;
     this.sliceTexture.needsUpdate = true;
     this.renderLegend(counts);
-
-    const elapsed = performance.now() - started;
-    this.renderStats.textContent = `${this.sliceAxis.toUpperCase()}=${this.sliceIndex}, ${width} x ${height}, ${elapsed.toFixed(1)} ms`;
   }
 
   private clearSliceCanvas(message: string): void {
@@ -695,6 +831,8 @@ class MeshSliceViewer {
     this.sliceContext.font = "16px system-ui, sans-serif";
     this.sliceContext.textAlign = "center";
     this.sliceContext.fillText(message, width / 2, height / 2);
+    this.sliceCanvas.classList.remove("corner-dot-mode");
+    this.sliceCanvas.parentElement?.classList.remove("corner-dot-mode");
   }
 
   private setSlicePlaneTextureEnabled(enabled: boolean): void {
@@ -815,9 +953,39 @@ class MeshSliceViewer {
     }
 
     const rect = this.sliceCanvas.getBoundingClientRect();
-    const px = clamp(Math.floor((event.clientX - rect.left) / rect.width * this.sliceCanvas.width), 0, this.sliceCanvas.width - 1);
-    const py = clamp(Math.floor((event.clientY - rect.top) / rect.height * this.sliceCanvas.height), 0, this.sliceCanvas.height - 1);
-    const sample = this.sampleSlicePixel(px, py, this.sliceCanvas.height);
+    const canvasX = (event.clientX - rect.left) / rect.width * this.sliceCanvas.width;
+    const canvasY = (event.clientY - rect.top) / rect.height * this.sliceCanvas.height;
+    let sample: SliceSample;
+
+    if ((this.sliceRenderMode.value as SliceRenderMode) === "cornerDots") {
+      const dims = this.getWorldDims();
+      const [gridWidth, gridHeight] = this.sliceAxis === "x"
+        ? [dims[2], dims[1]]
+        : this.sliceAxis === "y"
+          ? [dims[0], dims[2]]
+          : [dims[0], dims[1]];
+      const px = Math.round((canvasX - DOT_MARGIN) / DOT_SPACING);
+      const py = Math.round((canvasY - DOT_MARGIN) / DOT_SPACING);
+
+      if (px < 0 || py < 0 || px >= gridWidth || py >= gridHeight) {
+        this.setInspector();
+        return;
+      }
+
+      const centerX = DOT_MARGIN + px * DOT_SPACING;
+      const centerY = DOT_MARGIN + py * DOT_SPACING;
+      if (Math.hypot(canvasX - centerX, canvasY - centerY) > DOT_RADIUS + 0.75) {
+        this.setInspector();
+        return;
+      }
+
+      sample = this.sampleSlicePixel(px, py, gridHeight);
+    } else {
+      const px = clamp(Math.floor(canvasX), 0, this.sliceCanvas.width - 1);
+      const py = clamp(Math.floor(canvasY), 0, this.sliceCanvas.height - 1);
+      sample = this.sampleSlicePixel(px, py, this.sliceCanvas.height);
+    }
+
     const label = Number.isInteger(sample.label) ? String(sample.label) : sample.label.toFixed(4);
     const labelText = this.activeVolume.visualization === "finalCclComponents" && sample.label > 3
       ? `component ${Number.isInteger(sample.label - 3) ? String(sample.label - 3) : (sample.label - 3).toFixed(4)}`
@@ -897,6 +1065,7 @@ interface PipelineFolderCandidate {
   components?: File;
   cases?: File;
   insideFiltered?: File;
+  boundaryVoted?: File;
 }
 
 function findPipelineFolderSelection(files: File[]): PipelineFolderSelection {
@@ -929,6 +1098,8 @@ function findPipelineFolderSelection(files: File[]): PipelineFolderSelection {
       candidate.cases = file;
     } else if (role === "insideFiltered") {
       candidate.insideFiltered = file;
+    } else if (role === "boundaryVoted") {
+      candidate.boundaryVoted = file;
     } else {
       candidate.label = file;
     }
@@ -978,7 +1149,7 @@ function findPipelineFolderSelection(files: File[]): PipelineFolderSelection {
 
   return {
     directory: selected.directory,
-    volumes: [selected.label, selected.components, selected.cases, selected.insideFiltered]
+    volumes: [selected.label, selected.components, selected.cases, selected.insideFiltered, selected.boundaryVoted]
       .filter((file): file is File => Boolean(file)),
     mesh,
   };
@@ -1007,6 +1178,18 @@ function parsePipelineNpyFileName(name: string): { prefix: string; role: Pipelin
     return {
       prefix: String(auditStep - 1).padStart(3, "0"),
       role: "insideFiltered",
+    };
+  }
+
+  const boundaryMatch = /^(\d{3})_boundary_voted_labels\.npy$/i.exec(name);
+  if (boundaryMatch) {
+    const boundaryStep = Number(boundaryMatch[1]);
+    if (!Number.isInteger(boundaryStep) || boundaryStep <= 2) {
+      return null;
+    }
+    return {
+      prefix: String(boundaryStep - 2).padStart(3, "0"),
+      role: "boundaryVoted",
     };
   }
 
@@ -1085,7 +1268,10 @@ function hueToRgb(p: number, q: number, t: number): number {
 }
 
 function indexToWorld(index: number, dimension: number): number {
-  return -1 + (index + 0.5) * 2 / Math.max(1, dimension);
+  if (dimension <= 1) {
+    return 0;
+  }
+  return -1 + index * 2 / (dimension - 1);
 }
 
 function axisToIndex(axis: SliceAxis): 0 | 1 | 2 {

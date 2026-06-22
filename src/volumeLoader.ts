@@ -51,7 +51,11 @@ export function parseNpy(buffer: ArrayBuffer, name: string): VolumeData {
     .toLowerCase() ?? name.toLowerCase();
   let visualization: VolumeVisualization;
 
-  if (/^\d{3}_final_ccl_labels$/.test(baseName) || /^\d{3}_inside_filtered_labels$/.test(baseName)) {
+  if (
+    /^\d{3}_final_ccl_labels$/.test(baseName)
+    || /^\d{3}_inside_filtered_labels$/.test(baseName)
+    || /^\d{3}_boundary_voted_labels$/.test(baseName)
+  ) {
     visualization = "pipelineLabels";
   } else if (/^\d{3}_final_ccl_components$/.test(baseName)) {
     visualization = "finalCclComponents";
@@ -59,7 +63,7 @@ export function parseNpy(buffer: ArrayBuffer, name: string): VolumeData {
     visualization = "finalCclCases";
   } else {
     throw new Error(
-      `${name} is not a supported pipeline debug volume. Expected NNN_final_ccl_labels.npy, NNN_final_ccl_components.npy, NNN_final_ccl_cases.npy, or MMM_inside_filtered_labels.npy.`,
+      `${name} is not a supported pipeline debug volume. Expected NNN_final_ccl_labels.npy, NNN_final_ccl_components.npy, NNN_final_ccl_cases.npy, MMM_inside_filtered_labels.npy, or KKK_boundary_voted_labels.npy.`,
     );
   }
 

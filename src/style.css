@@ -197,6 +197,10 @@ select {
   max-width: 520px;
 }
 
+.slice-mode-control {
+  width: 172px;
+}
+
 .range-control {
   width: min(420px, 44vw);
 }
@@ -409,6 +413,11 @@ select {
   background-size: 16px 16px;
 }
 
+.slice-canvas-shell.corner-dot-mode {
+  place-items: start;
+  overflow: auto;
+}
+
 #sliceCanvas {
   display: block;
   width: min(100%, 680px);
@@ -419,6 +428,13 @@ select {
   background: #eef2f7;
   image-rendering: pixelated;
   image-rendering: crisp-edges;
+}
+
+#sliceCanvas.corner-dot-mode {
+  width: auto;
+  max-width: none;
+  max-height: none;
+  image-rendering: auto;
 }
 
 .legend-list {
@@ -525,6 +541,7 @@ select {
   .file-group .file-control,
   .stage-control,
   .select-control,
+  .slice-mode-control,
   .range-control,
   .slice-range {
     flex-basis: 100%;

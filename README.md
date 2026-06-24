@@ -26,10 +26,11 @@ Use the Folder input and select one pipeline output directory. The directory mus
 - `NNN_final_ccl_cases.npy`
 - `voxel_input_mesh.ply`
 
-The viewer also loads optional later-stage label volumes when they are present:
+The viewer also loads optional early/later-stage label volumes when they are present:
 
+- `000_initial_ccl_labels.npy`
 - `MMM_inside_filtered_labels.npy`, with `MMM = NNN + 1`
-- `KKK_boundary_voted_labels.npy`, with `KKK = NNN + 2`
+- `SSS_surface_boundary_classification.npy`, with `SSS = NNN + 2`
 
 The Array dropdown controls which loaded pipeline stage is shown. Volumes are loaded on demand, so switching stages does not keep every `r=512` array in browser memory at the same time.
 
@@ -57,13 +58,19 @@ The grid axes map directly to world axes: `[i, j, k] -> [x, y, z]`.
 
 ## Label Values
 
-`NNN_final_ccl_labels.npy`, `MMM_inside_filtered_labels.npy`, and `KKK_boundary_voted_labels.npy`:
+`000_initial_ccl_labels.npy` and `NNN_final_ccl_labels.npy`:
 
 - `0` unknown/background
 - `1` outside
 - `2` inside
 - `3` unresolved band
 - `4` surface barrier
+
+`MMM_inside_filtered_labels.npy`:
+
+- `0` unknown/background
+- `1` outside
+- `2` inside
 
 `NNN_final_ccl_components.npy`:
 
@@ -83,6 +90,14 @@ The grid axes map directly to world axes: `[i, j, k] -> [x, y, z]`.
 - `5` outside-only case
 - `6` both-sides case
 - `7` isolated case
+
+`SSS_surface_boundary_classification.npy`:
+
+- `0` unknown/background
+- `1` outside
+- `2` inside
+- `3` surface boundary classified inside
+- `4` surface boundary classified outside
 
 ## Performance
 

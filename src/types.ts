@@ -18,13 +18,16 @@ export type CategoryKey =
   | "insideOnly"
   | "outsideOnly"
   | "bothSides"
-  | "isolated";
+  | "isolated"
+  | "surfaceBoundaryInside"
+  | "surfaceBoundaryOutside";
 
 export type SliceAxis = "x" | "y" | "z";
 export type VolumeVisualization =
   | "pipelineLabels"
   | "finalCclComponents"
-  | "finalCclCases";
+  | "finalCclCases"
+  | "surfaceBoundaryClassification";
 
 export interface VolumeData {
   name: string;
@@ -54,6 +57,8 @@ export const CATEGORY_ORDER: CategoryKey[] = [
   "outsideOnly",
   "bothSides",
   "isolated",
+  "surfaceBoundaryInside",
+  "surfaceBoundaryOutside",
 ];
 
 export const CATEGORIES: Record<CategoryKey, CategoryDefinition> = {
@@ -107,6 +112,16 @@ export const CATEGORIES: Record<CategoryKey, CategoryDefinition> = {
     label: "Isolated case",
     color: "#06b6d4",
   },
+  surfaceBoundaryInside: {
+    key: "surfaceBoundaryInside",
+    label: "Surface boundary inside",
+    color: "#39ff14",
+  },
+  surfaceBoundaryOutside: {
+    key: "surfaceBoundaryOutside",
+    label: "Surface boundary outside",
+    color: "#ff00ff",
+  },
 };
 
 export function classifyVolumeLabel(value: number, visualization: VolumeVisualization): CategoryKey | null {
@@ -149,6 +164,23 @@ export function classifyVolumeLabel(value: number, visualization: VolumeVisualiz
         return "bothSides";
       case 7:
         return "isolated";
+      default:
+        return "unknown";
+    }
+  }
+
+  if (visualization === "surfaceBoundaryClassification") {
+    switch (label) {
+      case 0:
+        return "unknown";
+      case 1:
+        return "outside";
+      case 2:
+        return "inside";
+      case 3:
+        return "surfaceBoundaryInside";
+      case 4:
+        return "surfaceBoundaryOutside";
       default:
         return "unknown";
     }

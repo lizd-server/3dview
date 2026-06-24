@@ -42,7 +42,7 @@ interface SliceSample {
   category: CategoryKey | null;
 }
 
-type PipelineVolumeRole = "label" | "components" | "cases" | "insideFiltered" | "boundaryVoted";
+type PipelineVolumeRole = "label" | "components" | "cases" | "insideFiltered" | "surfaceBoundary";
 
 interface PipelineFolderSelection {
   directory: string;
@@ -375,9 +375,10 @@ class MeshSliceViewer {
 
     try {
       await this.loadMeshFiles(files, { replace: false });
-      this.meshInput.value = "";
     } catch (error) {
       this.setStatus(errorMessage(error));
+    } finally {
+      this.meshInput.value = "";
     }
   }
 
@@ -409,10 +410,11 @@ class MeshSliceViewer {
 
     const loadedCount = filesToLoad.length;
     const totalCount = this.currentMeshFiles.length;
+    const clippingNote = this.activeVolume ? "; clipped by current slice" : "";
     this.setStatus(
       loadedCount === totalCount
-        ? `Loaded ${totalCount} mesh${totalCount === 1 ? "" : "es"}`
-        : `Added ${loadedCount} mesh${loadedCount === 1 ? "" : "es"} (${totalCount} total)`,
+        ? `Loaded ${totalCount} mesh${totalCount === 1 ? "" : "es"}${clippingNote}`
+        : `Added ${loadedCount} mesh${loadedCount === 1 ? "" : "es"} (${totalCount} total)${clippingNote}`,
     );
   }
 
@@ -1065,12 +1067,13 @@ interface PipelineFolderCandidate {
   components?: File;
   cases?: File;
   insideFiltered?: File;
-  boundaryVoted?: File;
+  surfaceBoundary?: File;
 }
 
 function findPipelineFolderSelection(files: File[]): PipelineFolderSelection {
   const candidates = new Map<string, PipelineFolderCandidate>();
   const meshes = new Map<string, File>();
+  const initialLabels = new Map<string, File>();
 
   for (const file of files) {
     const path = (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name;
@@ -1081,6 +1084,11 @@ function findPipelineFolderSelection(files: File[]): PipelineFolderSelection {
 
     if (lowerName === "voxel_input_mesh.ply") {
       meshes.set(directory, file);
+      continue;
+    }
+
+    if (lowerName === "000_initial_ccl_labels.npy") {
+      initialLabels.set(directory, file);
       continue;
     }
 
@@ -1098,8 +1106,8 @@ function findPipelineFolderSelection(files: File[]): PipelineFolderSelection {
       candidate.cases = file;
     } else if (role === "insideFiltered") {
       candidate.insideFiltered = file;
-    } else if (role === "boundaryVoted") {
-      candidate.boundaryVoted = file;
+    } else if (role === "surfaceBoundary") {
+      candidate.surfaceBoundary = file;
     } else {
       candidate.label = file;
     }
@@ -1149,7 +1157,7 @@ function findPipelineFolderSelection(files: File[]): PipelineFolderSelection {
 
   return {
     directory: selected.directory,
-    volumes: [selected.label, selected.components, selected.cases, selected.insideFiltered, selected.boundaryVoted]
+    volumes: [initialLabels.get(selected.directory), selected.label, selected.components, selected.cases, selected.insideFiltered, selected.surfaceBoundary]
       .filter((file): file is File => Boolean(file)),
     mesh,
   };
@@ -1181,15 +1189,15 @@ function parsePipelineNpyFileName(name: string): { prefix: string; role: Pipelin
     };
   }
 
-  const boundaryMatch = /^(\d{3})_boundary_voted_labels\.npy$/i.exec(name);
-  if (boundaryMatch) {
-    const boundaryStep = Number(boundaryMatch[1]);
-    if (!Number.isInteger(boundaryStep) || boundaryStep <= 2) {
+  const surfaceBoundaryMatch = /^(\d{3})_surface_boundary_classification\.npy$/i.exec(name);
+  if (surfaceBoundaryMatch) {
+    const surfaceBoundaryStep = Number(surfaceBoundaryMatch[1]);
+    if (!Number.isInteger(surfaceBoundaryStep) || surfaceBoundaryStep <= 2) {
       return null;
     }
     return {
-      prefix: String(boundaryStep - 2).padStart(3, "0"),
-      role: "boundaryVoted",
+      prefix: String(surfaceBoundaryStep - 2).padStart(3, "0"),
+      role: "surfaceBoundary",
     };
   }
 

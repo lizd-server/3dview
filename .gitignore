@@ -1,3 +1,6 @@
 node_modules/
 dist/
+dist-mac/
+.logs/
+assets/AppIcon.iconset/
 .DS_Store

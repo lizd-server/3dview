@@ -19,6 +19,7 @@ export type CategoryKey =
   | "outsideOnly"
   | "bothSides"
   | "isolated"
+  | "linfCase"
   | "surfaceBoundaryInside"
   | "surfaceBoundaryOutside";
 
@@ -27,7 +28,11 @@ export type VolumeVisualization =
   | "pipelineLabels"
   | "finalCclComponents"
   | "finalCclCases"
-  | "surfaceBoundaryClassification";
+  | "componentLabels"
+  | "boundaryMask"
+  | "surfaceBoundaryClassification"
+  | "linfinityDistanceCases"
+  | "scalarField";
 
 export interface VolumeData {
   name: string;
@@ -38,6 +43,15 @@ export interface VolumeData {
   fortranOrder: boolean;
   warnings: string[];
   visualization: VolumeVisualization;
+  labelMetadata?: VolumeLabelMetadata;
+}
+
+export interface VolumeLabelMetadata {
+  kind?: string;
+  labels?: Record<string, string>;
+  dynamicLabels?: Record<string, string>;
+  valueDescription?: string;
+  isovalue?: number;
 }
 
 export interface CategoryDefinition {
@@ -57,6 +71,7 @@ export const CATEGORY_ORDER: CategoryKey[] = [
   "outsideOnly",
   "bothSides",
   "isolated",
+  "linfCase",
   "surfaceBoundaryInside",
   "surfaceBoundaryOutside",
 ];
@@ -112,6 +127,11 @@ export const CATEGORIES: Record<CategoryKey, CategoryDefinition> = {
     label: "Isolated case",
     color: "#06b6d4",
   },
+  linfCase: {
+    key: "linfCase",
+    label: "L-infinity distance case",
+    color: "#64748b",
+  },
   surfaceBoundaryInside: {
     key: "surfaceBoundaryInside",
     label: "Surface boundary inside",
@@ -129,7 +149,23 @@ export function classifyVolumeLabel(value: number, visualization: VolumeVisualiz
     return null;
   }
 
+  if (visualization === "scalarField") {
+    return null;
+  }
+
   const label = Math.trunc(value);
+
+  if (visualization === "boundaryMask") {
+    return label === 0 ? "unknown" : "surface";
+  }
+
+  if (visualization === "componentLabels") {
+    return label === 0 ? "unknown" : "components";
+  }
+
+  if (visualization === "linfinityDistanceCases") {
+    return "linfCase";
+  }
 
   if (visualization === "finalCclComponents") {
     switch (label) {

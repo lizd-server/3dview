@@ -9,7 +9,23 @@ npm install
 npm run dev
 ```
 
-The dev server defaults to `http://127.0.0.1:5173/`.
+The dev command starts:
+
+- frontend: `http://127.0.0.1:5173/`
+- local remote-file backend: `http://127.0.0.1:5175/`
+
+For a persistent local service managed by pm2:
+
+```bash
+npm run pm2:start
+pm2 save
+```
+
+Useful pm2 commands:
+
+- `pm2 status`
+- `npm run pm2:logs`
+- `npm run pm2:stop`
 
 For a production build:
 
@@ -17,26 +33,59 @@ For a production build:
 npm run build
 ```
 
+## macOS App
+
+Create and install the standalone Electron macOS app:
+
+```bash
+npm run mac:app
+```
+
+This writes `dist-mac/Voxel Mesh Viewer-darwin-<arch>/Voxel Mesh Viewer.app` and installs a copy to `~/Applications/Voxel Mesh Viewer.app`.
+
+Double-clicking the app opens a native macOS application window, not an external browser. The packaged app serves the built frontend and the read-only remote-file API inside the Electron main process on an app-owned loopback port, so PM2, Vite, and fixed ports such as `5173`/`5175` are not required for normal app use.
+
 ## Input Folder
 
-Use the Folder input and select one pipeline output directory. The directory must contain:
+Use the Folder input and select one pipeline output directory. The viewer loads every supported `.npy` that is present, so incomplete debug folders can still be inspected. A complete final CCL stage includes:
 
 - `NNN_final_ccl_labels.npy`
 - `NNN_final_ccl_components.npy`
 - `NNN_final_ccl_cases.npy`
-- `voxel_input_mesh.ply`
 
-The viewer also loads optional early/later-stage label volumes when they are present:
+The viewer also loads earlier/later-stage and newer debug volumes when they are present:
 
+- `000_original_boundary.npy`
+- `001_closed_boundary.npy`
+- `002_free_space_labels.npy`
+- `003_pseudo_boundary_components.npy`
+- `004_final_labels.npy`
 - `000_initial_ccl_labels.npy`
 - `MMM_inside_filtered_labels.npy`, with `MMM = NNN + 1`
 - `SSS_surface_boundary_classification.npy`, with `SSS = NNN + 2`
+- `999_scalar_field.npy`
+- `999_linf_distance_cases.npy`, when the upstream run uses the L-infinity distance field
+- `npy_labels.json`, when present, documents the upstream label meanings for the folder
+
+If `.ply`, `.obj`, or `.stl` meshes are present in the selected pipeline directory, they are loaded with the volumes. For the current pipeline this usually includes both `voxel_input_mesh.ply` and `mesh.ply`. If meshes are missing, the viewer still shows the available slices.
 
 The Array dropdown controls which loaded pipeline stage is shown. Volumes are loaded on demand, so switching stages does not keep every `r=512` array in browser memory at the same time.
 
 Meshes are rendered in their source coordinates. The viewer does not normalize or remap mesh geometry.
 
 Additional `.ply`, `.obj`, or `.stl` meshes can be added with Add mesh. The mesh visibility bar controls which meshes are visible.
+
+## Remote Folders
+
+The Remote panel defaults to `/mnt/bn/vai3d-hl-1/Users/lizd/work/floodfill/output` on `hl_gpu_2` through the local backend. The SSH host field is editable, so any safe local SSH alias such as `126781` can be used. The backend uses the existing local SSH configuration and only reads files.
+
+1. Open Remote.
+2. Browse or enter a server path.
+3. Select Load current folder, or use a directory row's Load button to load that folder directly.
+
+Remote folders use the same required and optional file names as local folders. Meshes load when the folder is selected; `.npy` volumes are downloaded on demand when their Array entry is selected.
+Remote mesh and `.npy` downloads show progress in the top bar. Downloaded remote files are stored in the browser's IndexedDB cache by remote path, size, and mtime, so loading the same unchanged remote file again avoids another SSH download without keeping every parsed volume in memory. Remote `.ply`, `.obj`, and `.stl` files can also be added directly from the Remote file list.
+Use Download current folder, or a directory row's Download button, to prefetch every recognized pipeline `.npy` plus mesh files into the browser cache without changing the current view.
 
 ## Display
 
@@ -98,6 +147,18 @@ The grid axes map directly to world axes: `[i, j, k] -> [x, y, z]`.
 - `2` inside
 - `3` surface boundary classified inside
 - `4` surface boundary classified outside
+
+`999_scalar_field.npy`:
+
+- signed scalar field used for mesh extraction
+- positive values are outside, negative values are inside
+- slice colors follow the server visualizer: zero is white, positive near zero trends red, negative near zero trends blue, and `|value| > 0.1` is black
+
+`999_linf_distance_cases.npy`:
+
+- L-infinity distance case ids emitted by the upstream pipeline
+- the viewer displays each case id with a stable pseudo-random color and shows per-case counts for the current slice
+- when `npy_labels.json` is present, the viewer uses the upstream manifest text for the case names in the legend and inspector
 
 ## Performance
 

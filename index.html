@@ -15,15 +15,52 @@
 
         <div class="top-actions">
           <div class="control-group file-group" aria-label="Load data">
-            <label class="file-control folder-control">
+            <label class="file-control folder-control toolbar-item" data-tool="folder">
               <span>Folder</span>
               <input id="folderInput" type="file" webkitdirectory multiple />
             </label>
-            <label class="file-control">
+            <label class="file-control toolbar-item" data-tool="mesh">
               <span>Add mesh</span>
               <input id="meshInput" type="file" accept=".ply,.obj,.stl" multiple />
             </label>
           </div>
+
+          <details class="remote-panel">
+            <summary class="toolbar-item" data-tool="remote">Remote</summary>
+            <div id="remoteBrowser" class="remote-browser">
+              <div class="remote-toolbar">
+                <input id="remoteHostInput" class="remote-host" type="text" value="hl_gpu_2" spellcheck="false" aria-label="SSH host" />
+                <input id="remotePathInput" type="text" spellcheck="false" aria-label="Remote path" />
+                <button id="remoteGoButton" type="button">Go</button>
+                <button id="remoteUpButton" type="button">Up</button>
+                <button id="remoteRefreshButton" type="button">Refresh</button>
+              </div>
+              <div id="remoteStatus" class="remote-status">Remote backend not connected</div>
+              <section class="remote-cache" aria-label="Remote cache">
+                <div class="remote-cache-head">
+                  <div>
+                    <span class="remote-cache-kicker">Cache</span>
+                    <strong id="remoteCacheUsage">Checking...</strong>
+                  </div>
+                  <button id="remoteCacheRefreshButton" type="button">Refresh</button>
+                </div>
+                <div id="remoteCacheDetails" class="remote-cache-details">Browser cache usage is measured locally.</div>
+                <div class="remote-cache-actions" aria-label="Clear cached files older than">
+                  <span>Clear older than</span>
+                  <button id="remoteCacheClear1hButton" type="button">1h</button>
+                  <button id="remoteCacheClear1dButton" type="button">1d</button>
+                  <button id="remoteCacheClear7dButton" type="button">7d</button>
+                </div>
+              </section>
+              <div id="remoteList" class="remote-list" aria-label="Remote directory"></div>
+              <div class="remote-actions">
+                <button id="remoteDownloadButton" type="button">Download Folder</button>
+                <button id="remoteLoadButton" type="button">Load Folder</button>
+              </div>
+            </div>
+          </details>
+
+          <div id="loadProgress" class="load-progress hidden" role="status" aria-live="polite"></div>
 
           <label class="select-control stage-control hidden" id="arraySelectRow">
             <span>Array</span>
@@ -32,7 +69,7 @@
 
           <div class="control-group action-group">
             <details class="options-panel">
-              <summary>Options</summary>
+              <summary class="toolbar-item" data-tool="options">Options</summary>
               <div class="options-grid">
                 <label class="select-control">
                   <span>Mesh mode</span>
@@ -44,9 +81,14 @@
                   </select>
                 </label>
                 <label class="range-control short-range">
-                  <span>Opacity</span>
+                  <span>Mesh opacity</span>
                   <input id="meshOpacity" type="range" min="0" max="1" step="0.01" value="1" />
                   <output id="meshOpacityValue">1.00</output>
+                </label>
+                <label class="range-control short-range">
+                  <span>Slice opacity</span>
+                  <input id="sliceOpacity" type="range" min="0" max="1" step="0.01" value="0.82" />
+                  <output id="sliceOpacityValue">0.82</output>
                 </label>
                 <button id="clearMeshButton" type="button">Clear mesh</button>
               </div>
@@ -55,7 +97,7 @@
         </div>
       </header>
 
-      <main class="workspace">
+      <main id="workspace" class="workspace single-pane">
         <section class="mesh-pane">
           <div class="pane-heading">
             <div>
@@ -71,7 +113,7 @@
               <label class="range-control slice-range">
                 <span id="sliceLabel">Z slice</span>
                 <input id="sliceSlider" type="range" min="0" max="0" value="0" disabled />
-                <output id="sliceValue">-</output>
+                <input id="sliceValue" class="slice-index-input" type="number" min="0" max="0" value="" placeholder="-" disabled aria-label="Slice index" />
               </label>
               <button id="resetCameraButton" type="button">Reset</button>
             </div>
@@ -80,7 +122,7 @@
           <canvas id="viewerCanvas"></canvas>
         </section>
 
-        <section class="slice-pane">
+        <section class="slice-pane empty-state">
           <div class="pane-heading">
             <div>
               <h2>Slice colors</h2>
@@ -94,8 +136,8 @@
               </select>
             </label>
           </div>
-          <div class="slice-canvas-shell">
-            <canvas id="sliceCanvas"></canvas>
+          <div class="slice-canvas-shell empty-state">
+            <canvas id="sliceCanvas" class="empty-state"></canvas>
           </div>
           <div id="legendList" class="legend-list"></div>
           <dl id="inspectorList" class="inspector-list">

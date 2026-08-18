@@ -376,6 +376,10 @@ select {
   accent-color: #2467d6;
 }
 
+.mesh-normalize-control {
+  min-height: 30px;
+}
+
 .vxz-color-control {
   width: 132px;
 }

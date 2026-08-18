@@ -159,7 +159,11 @@ If `.ply`, `.obj`, or `.stl` meshes are present in the selected pipeline directo
 
 The Array dropdown controls which loaded pipeline stage is shown. Volumes are loaded on demand, so switching stages does not keep every `r=512` array in browser memory at the same time.
 
-Meshes are rendered in their source coordinates. The viewer does not normalize or remap mesh geometry.
+Meshes are rendered in their source coordinates by default. Enable **Normalize
+imports to current size** in Options before using Add mesh or Remote Add to
+uniformly scale each new mesh so its longest bounding-box edge matches the
+currently loaded mesh bounds and both bounding-box centers align. If no current
+mesh bounds are available, the imported mesh keeps its source coordinates.
 
 Additional `.ply`, `.obj`, or `.stl` meshes can be added with Add mesh. The mesh visibility bar controls which meshes are visible.
 

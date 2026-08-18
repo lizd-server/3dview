@@ -18,6 +18,7 @@ import {
   type VxzJobResponse,
   type VxzMetadata,
 } from "./types";
+import { normalizeObjectToBounds } from "./mesh-normalization";
 import { parseNpy } from "./volumeLoader";
 
 type MeshMode = "solid" | "wireframe" | "transparent" | "solidWire";
@@ -242,6 +243,7 @@ class MeshSliceViewer {
   private readonly meshModeSelect = getElement<HTMLSelectElement>("meshModeSelect");
   private readonly meshOpacity = getElement<HTMLInputElement>("meshOpacity");
   private readonly meshOpacityValue = getElement<HTMLOutputElement>("meshOpacityValue");
+  private readonly normalizeImportedMesh = getElement<HTMLInputElement>("normalizeImportedMesh");
   private readonly sliceOpacity = getElement<HTMLInputElement>("sliceOpacity");
   private readonly sliceOpacityValue = getElement<HTMLOutputElement>("sliceOpacityValue");
   private readonly meshList = getElement<HTMLElement>("meshList");
@@ -856,7 +858,10 @@ class MeshSliceViewer {
 
     try {
       const directoryPath = directoryName(entry.path);
-      await this.loadMeshFiles([new RemoteFileHandle(this.currentRemoteHost(), entry.name, entry.path, directoryPath, entry.size, entry.mtimeMs)], { replace: false });
+      await this.loadMeshFiles(
+        [new RemoteFileHandle(this.currentRemoteHost(), entry.name, entry.path, directoryPath, entry.size, entry.mtimeMs)],
+        { replace: false, normalizeToCurrentSize: this.normalizeImportedMesh.checked },
+      );
       this.setRemoteStatus(`Added mesh ${entry.name}`);
     } catch (error) {
       if (!isAbortError(error)) {
@@ -1511,7 +1516,10 @@ class MeshSliceViewer {
     }
 
     try {
-      await this.loadMeshFiles(files, { replace: false });
+      await this.loadMeshFiles(files, {
+        replace: false,
+        normalizeToCurrentSize: this.normalizeImportedMesh.checked,
+      });
     } catch (error) {
       if (!isAbortError(error)) {
         this.setStatus(errorMessage(error));
@@ -1521,9 +1529,20 @@ class MeshSliceViewer {
     }
   }
 
-  private async loadMeshFiles(files: SourceFile[], options: { replace: boolean; visibility?: boolean[] }): Promise<void> {
+  private async loadMeshFiles(
+    files: SourceFile[],
+    options: {
+      replace: boolean;
+      visibility?: boolean[];
+      normalizeToCurrentSize?: boolean;
+    },
+  ): Promise<void> {
     const filesToLoad = [...files];
     const visibility = options.visibility ?? [];
+    const normalizationBounds = options.normalizeToCurrentSize
+      ? this.currentMeshBounds()
+      : null;
+    let normalizedCount = 0;
 
     if (options.replace) {
       this.clearGroup(this.meshRoot);
@@ -1557,6 +1576,9 @@ class MeshSliceViewer {
           this.removeLoadProgress(loadTaskId);
         }
       }
+      if (normalizationBounds && normalizeObjectToBounds(object, normalizationBounds)) {
+        normalizedCount += 1;
+      }
       this.currentMeshFiles.push(file);
       const root = this.addMeshObject(object, file.name, visibility[index] ?? true);
       this.meshItems.push({
@@ -1572,11 +1594,22 @@ class MeshSliceViewer {
     const loadedCount = filesToLoad.length;
     const totalCount = this.currentMeshFiles.length;
     const clippingNote = this.activeVolume ? "; clipped by current slice" : "";
+    const normalizationNote = options.normalizeToCurrentSize
+      ? normalizedCount > 0
+        ? "; normalized to current size"
+        : "; current size unavailable, kept source size"
+      : "";
     this.setStatus(
       loadedCount === totalCount
-        ? `Loaded ${totalCount} mesh${totalCount === 1 ? "" : "es"}${clippingNote}`
-        : `Added ${loadedCount} mesh${loadedCount === 1 ? "" : "es"} (${totalCount} total)${clippingNote}`,
+        ? `Loaded ${totalCount} mesh${totalCount === 1 ? "" : "es"}${normalizationNote}${clippingNote}`
+        : `Added ${loadedCount} mesh${loadedCount === 1 ? "" : "es"} (${totalCount} total)${normalizationNote}${clippingNote}`,
     );
+  }
+
+  private currentMeshBounds(): THREE.Box3 | null {
+    this.meshRoot.updateWorldMatrix(true, true);
+    const bounds = new THREE.Box3().setFromObject(this.meshRoot);
+    return bounds.isEmpty() ? null : bounds;
   }
 
   private async parseMesh(file: SourceFile, onProgress?: ProgressCallback, signal?: AbortSignal): Promise<THREE.Object3D> {

@@ -82,14 +82,18 @@ The integrated VXZ path loads three coordinated views from the same source
 coordinates:
 
 - a voxel overview capped at about 750,000 cell-centered points;
-- a dual-grid mesh preview capped at 2,000,000 triangles;
+- a decoded dual-grid mesh rendered through the same solid/wireframe/transparent
+  material and slice-clipping pipeline as imported PLY/OBJ/STL meshes; its viewport
+  LOD targets about 5,000,000 triangles;
 - an exact on-demand `R x R` X/Y/Z slice queried from every sparse VXZ record.
 
 The Options panel can independently hide the mesh or voxels, change point
 size, and color voxels by occupancy, signed intersections, or dual offset.
-The exact decoded mesh remains available through `decode_vxz.py`; the 3D mesh
-inside the interactive viewer is deliberately a preview so the supplied
-42.9-million-triangle sample does not allocate the full mesh in browser memory.
+The exact decoded mesh remains available through `decode_vxz.py`. The interactive
+viewer uses a vertex-clustered, connected viewport LOD from that decoded topology
+so the supplied 42.9-million-triangle sample does not allocate the full mesh in
+browser memory. This LOD is a regular mesh object (not a point or placeholder
+preview), and it can be shown together with the exact grid-aligned voxel slice.
 
 VXZ slices are cell-centered. For resolution `R`, slice index `k` is placed at
 `-0.5 + (k + 0.5) / R`. The right pane is a native `R x R` scrollable canvas

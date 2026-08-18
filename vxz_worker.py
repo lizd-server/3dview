@@ -23,8 +23,9 @@ import decode_vxz
 Axis = Literal["x", "y", "z"]
 AXIS_TO_INDEX: dict[Axis, int] = {"x": 0, "y": 1, "z": 2}
 WORKER_FORMAT_VERSION = 1
+CACHE_FORMAT_VERSION = 3
 DEFAULT_POINT_BUDGET = 750_000
-DEFAULT_MESH_FACE_BUDGET = 2_000_000
+DEFAULT_MESH_FACE_BUDGET = 5_000_000
 
 VOXEL_RECORD_DTYPE = np.dtype(
     [
@@ -209,20 +210,104 @@ def _preview_indices(voxel_count: int, budget: int) -> NDArray[np.int64]:
     return np.arange(0, voxel_count, stride, dtype=np.int64)
 
 
-def _uniform_quad_selection(
-    quads: NDArray[np.int32],
-    start: int,
-    total: int,
-    target: int,
-) -> NDArray[np.bool_]:
-    if target >= total:
-        return np.ones(len(quads), dtype=np.bool_)
-    ordinal = np.arange(start, start + len(quads), dtype=np.uint64)
-    target_u64 = np.uint64(target)
-    total_u64 = np.uint64(total)
-    return ((ordinal + np.uint64(1)) * target_u64 // total_u64) != (
-        ordinal * target_u64 // total_u64
+def _cluster_vertex_map(
+    coords: NDArray[np.integer],
+    dual: NDArray[np.uint8],
+    resolution: int,
+    cluster_width: int,
+) -> tuple[NDArray[np.float32], NDArray[np.int32]]:
+    """Collapse nearby dual vertices without dropping isolated surface faces."""
+    if cluster_width <= 0:
+        raise ValueError("cluster width must be positive")
+
+    # Work in exact 1/255-cell integer units. A dual value of 255 belongs to
+    # the following cell, matching the decoded vertex position exactly.
+    cluster_coords = coords.astype(np.int32, copy=True)
+    cluster_coords *= 255
+    cluster_coords += dual.astype(np.int32, copy=False)
+    cluster_coords //= cluster_width * 255
+    cluster_keys = decode_vxz._pack_coords(cluster_coords)
+    _, inverse = np.unique(
+        cluster_keys,
+        return_inverse=True,
     )
+    cluster_count = int(inverse.max()) + 1
+    counts = np.bincount(inverse, minlength=cluster_count)
+    positions = np.empty((cluster_count, 3), dtype=np.float32)
+    for axis in range(3):
+        local = coords[:, axis].astype(np.float64)
+        local += dual[:, axis].astype(np.float64) / 255.0
+        sums = np.bincount(inverse, weights=local, minlength=cluster_count)
+        positions[:, axis] = (
+            sums / counts / float(resolution) - 0.5
+        ).astype(np.float32)
+    return positions, inverse.astype(np.int32, copy=False)
+
+
+def _deduplicate_triangles(
+    triangles: NDArray[np.int32],
+) -> NDArray[np.int32]:
+    """Remove duplicate faces while preserving the first face's winding."""
+    if not len(triangles):
+        return triangles
+    canonical = np.sort(triangles, axis=1)
+    records = np.ascontiguousarray(canonical).view(
+        np.dtype([("a", "<i4"), ("b", "<i4"), ("c", "<i4")])
+    ).reshape(-1)
+    _, first_indices = np.unique(records, return_index=True)
+    return triangles[np.sort(first_indices)]
+
+
+def _clustered_mesh_preview(
+    coords: NDArray[np.int32],
+    dual: NDArray[np.uint8],
+    intersected: NDArray[np.uint8],
+    resolution: int,
+    keys: NDArray[np.uint64],
+    sorted_keys: NDArray[np.uint64],
+    sorted_to_original: NDArray[np.int64],
+    quad_count: int,
+    mesh_face_budget: int,
+) -> tuple[NDArray[np.float32], NDArray[np.uint32], int]:
+    # Surface triangle count scales approximately with the square of the
+    # spatial clustering width. Unlike face sampling, clustering retains a
+    # connected coarse surface that still reads as the decoded mesh.
+    cluster_width = max(1, int(np.ceil(np.sqrt((quad_count * 2) / mesh_face_budget))))
+    cluster_positions, vertex_clusters = _cluster_vertex_map(
+        coords, dual, resolution, cluster_width
+    )
+
+    clustered_batches: list[NDArray[np.int32]] = []
+    visited_quads = 0
+    for quads in decode_vxz._candidate_batches(
+        keys,
+        intersected,
+        sorted_keys,
+        sorted_to_original,
+        decode_vxz.DEFAULT_TOPOLOGY_BATCH_SIZE,
+    ):
+        exact_triangles = decode_vxz._triangulate_quads(
+            quads, coords, dual, resolution
+        )
+        clustered = vertex_clusters[exact_triangles]
+        nondegenerate = (
+            (clustered[:, 0] != clustered[:, 1])
+            & (clustered[:, 1] != clustered[:, 2])
+            & (clustered[:, 2] != clustered[:, 0])
+        )
+        if nondegenerate.any():
+            clustered_batches.append(clustered[nondegenerate])
+        visited_quads += len(quads)
+        _progress(
+            "mesh",
+            0.5 + 0.24 * visited_quads / quad_count,
+            f"Clustering decoded mesh {visited_quads:,}/{quad_count:,} quads",
+        )
+
+    triangles = _deduplicate_triangles(np.concatenate(clustered_batches, axis=0))
+    used_vertices, remapped = np.unique(triangles.reshape(-1), return_inverse=True)
+    positions = cluster_positions[used_vertices]
+    return positions, remapped.astype(np.uint32, copy=False), cluster_width
 
 
 def prepare_cache(
@@ -239,6 +324,7 @@ def prepare_cache(
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
         if (
             metadata.get("formatVersion") == WORKER_FORMAT_VERSION
+            and metadata.get("cacheVersion") == CACHE_FORMAT_VERSION
             and (resolution is None or metadata.get("resolution") == resolution)
         ):
             _progress("ready", 1.0, "Using cached VXZ data")
@@ -287,37 +373,18 @@ def prepare_cache(
     if quad_count == 0:
         raise ValueError("decoded mesh has no valid dual-grid quads")
 
-    target_quads = min(quad_count, max(1, mesh_face_budget // 2))
-    selected_quads: list[NDArray[np.int32]] = []
-    visited_quads = 0
-    for quads in decode_vxz._candidate_batches(
-        keys,
+    positions, remapped, cluster_width = _clustered_mesh_preview(
+        data.coords,
+        data.dual_vertices,
         data.intersected,
+        resolution,
+        keys,
         sorted_keys,
         sorted_to_original,
-        decode_vxz.DEFAULT_TOPOLOGY_BATCH_SIZE,
-    ):
-        selected = _uniform_quad_selection(
-            quads, visited_quads, quad_count, target_quads
-        )
-        if selected.any():
-            selected_quads.append(quads[selected])
-        visited_quads += len(quads)
-        _progress(
-            "mesh",
-            0.5 + 0.28 * visited_quads / quad_count,
-            f"Sampling mesh preview {visited_quads:,}/{quad_count:,} quads",
-        )
-
-    preview_quads = np.concatenate(selected_quads, axis=0)
-    triangles = decode_vxz._triangulate_quads(
-        preview_quads, data.coords, data.dual_vertices
+        quad_count,
+        mesh_face_budget,
     )
-    used_vertices, remapped = np.unique(triangles.reshape(-1), return_inverse=True)
-    positions = dual_world_vertices(
-        data.coords[used_vertices], data.dual_vertices[used_vertices], resolution
-    )
-    mesh_payload = build_mesh_payload(positions, remapped.astype(np.uint32, copy=False))
+    mesh_payload = build_mesh_payload(positions, remapped)
     _atomic_write_bytes(cache_dir / "mesh.bin", mesh_payload)
 
     bounds_min = dual_world_vertices(
@@ -328,6 +395,7 @@ def prepare_cache(
     ).max(axis=0)
     metadata: dict[str, object] = {
         "formatVersion": WORKER_FORMAT_VERSION,
+        "cacheVersion": CACHE_FORMAT_VERSION,
         "sourceName": source.name,
         "resolution": resolution,
         "resolutionSource": resolution_source,
@@ -337,6 +405,8 @@ def prepare_cache(
         "previewVoxelCount": len(preview_indices),
         "previewVertexCount": len(positions),
         "previewFaceCount": len(remapped) // 3,
+        "previewMode": "vertex-clustered",
+        "previewClusterWidth": cluster_width,
         "boundsMin": bounds_min.tolist(),
         "boundsMax": bounds_max.tolist(),
         "gridMin": data.coords.min(axis=0).tolist(),
@@ -347,7 +417,7 @@ def prepare_cache(
         metadata_path,
         json.dumps(metadata, ensure_ascii=False, indent=2).encode("utf-8"),
     )
-    _progress("ready", 1.0, "VXZ mesh and voxel previews are ready")
+    _progress("ready", 1.0, "VXZ mesh and voxel views are ready")
     return metadata
 
 

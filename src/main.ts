@@ -67,6 +67,7 @@ const VXZ_VOXEL_HEADER_BYTES = 16;
 const VXZ_SLICE_HEADER_BYTES = 24;
 const VXZ_MESH_HEADER_BYTES = 16;
 const VXZ_VOXEL_RECORD_BYTES = 10;
+const LIGHTWEIGHT_WIREFRAME_FACE_THRESHOLD = 250_000;
 
 if (IS_ELECTRON_APP) {
   document.documentElement.classList.add("electron-app");
@@ -276,7 +277,7 @@ class MeshSliceViewer {
   private nextMeshId = 1;
   private vxzJobId: string | null = null;
   private vxzMetadata: VxzMetadata | null = null;
-  private vxzMeshObject: THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicMaterial> | null = null;
+  private vxzMeshObject: THREE.Object3D | null = null;
   private vxzVoxelObject: THREE.Points<THREE.BufferGeometry, THREE.PointsMaterial> | null = null;
   private vxzPreviewRecords: VxzPreviewRecords | null = null;
   private vxzSliceRecords = new Map<number, VxzSliceRecord>();
@@ -1255,8 +1256,8 @@ class MeshSliceViewer {
       this.vxzSliceRecords.clear();
       this.vxzOptions.classList.remove("hidden");
       this.vxzMeshVisible.checked = true;
-      this.vxzVoxelsVisible.checked = true;
-      this.voxelRoot.visible = true;
+      this.vxzVoxelsVisible.checked = false;
+      this.voxelRoot.visible = false;
       this.sliceRenderMode.value = "pixels";
       this.sliceRenderMode.disabled = true;
 
@@ -1293,7 +1294,8 @@ class MeshSliceViewer {
       if (token !== this.vxzLoadToken) {
         throw new DOMException("Superseded VXZ load", "AbortError");
       }
-      this.loadVxzMeshPreview(meshBuffer, sourceName);
+      this.loadDecodedVxzMesh(meshBuffer, sourceName);
+      this.frameVxzMesh();
       this.updateVxzPointSize();
       this.updateMeshDisplay();
 
@@ -1304,7 +1306,8 @@ class MeshSliceViewer {
       const metadata = this.vxzMetadata;
       this.setStatus(
         `Loaded ${sourceName}: r=${metadata.resolution}, ${metadata.voxelCount.toLocaleString()} voxels, `
-        + `${metadata.faceCount.toLocaleString()} exact faces; preview ${metadata.previewFaceCount.toLocaleString()} faces`,
+        + `${metadata.faceCount.toLocaleString()} exact faces; `
+        + `decoded mesh viewport LOD ${metadata.previewFaceCount.toLocaleString()} faces`,
       );
     } catch (error) {
       if (loadTaskId !== null) {
@@ -1393,7 +1396,7 @@ class MeshSliceViewer {
     this.updateVxzVoxelColors();
   }
 
-  private loadVxzMeshPreview(buffer: ArrayBuffer, sourceName: string): void {
+  private loadDecodedVxzMesh(buffer: ArrayBuffer, sourceName: string): void {
     const view = new DataView(buffer);
     assertBinaryMagic(view, "VXMP", VXZ_MESH_HEADER_BYTES);
     const version = view.getUint32(4, true);
@@ -1401,7 +1404,7 @@ class MeshSliceViewer {
     const indexCount = view.getUint32(12, true);
     const indexOffset = VXZ_MESH_HEADER_BYTES + vertexCount * 3 * 4;
     if (version !== 1 || indexCount % 3 !== 0 || buffer.byteLength !== indexOffset + indexCount * 4) {
-      throw new Error("VXZ mesh preview byte length is inconsistent");
+      throw new Error("VXZ decoded mesh byte length is inconsistent");
     }
     const positions = new Float32Array(buffer, VXZ_MESH_HEADER_BYTES, vertexCount * 3);
     const indices = new Uint32Array(buffer, indexOffset, indexCount);
@@ -1409,23 +1412,15 @@ class MeshSliceViewer {
     geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
     geometry.setIndex(new THREE.BufferAttribute(indices, 1));
     geometry.computeBoundingSphere();
-    const material = new THREE.MeshBasicMaterial({
-      color: "#aebbd0",
-      side: THREE.DoubleSide,
-      transparent: true,
-      opacity: Number(this.meshOpacity.value),
-      clippingPlanes: this.meshClippingPlanes,
-    });
-    const mesh = new THREE.Mesh(geometry, material);
-    mesh.name = `${sourceName} mesh preview`;
-    mesh.userData.viewerRole = "vxzSolid";
-    mesh.visible = this.vxzMeshVisible.checked;
-    this.meshRoot.add(mesh);
-    this.vxzMeshObject = mesh;
+    const mesh = new THREE.Mesh(geometry);
+    mesh.userData.preferLightweightWireframe = true;
+    const meshName = `${sourceName} decoded mesh (viewport LOD)`;
+    const root = this.addMeshObject(mesh, meshName, this.vxzMeshVisible.checked);
+    this.vxzMeshObject = root;
     this.meshItems.push({
       id: this.nextMeshId,
-      name: mesh.name,
-      object: mesh,
+      name: meshName,
+      object: root,
     });
     this.nextMeshId += 1;
     this.renderMeshList();
@@ -1585,13 +1580,16 @@ class MeshSliceViewer {
   }
 
   private addMeshObject(object: THREE.Object3D, name: string, visible = true): THREE.Object3D {
-    object.name = name;
-    object.visible = visible;
-    this.prepareMeshObject(object);
-    this.meshRoot.add(object);
+    const root = new THREE.Group();
+    root.name = name;
+    root.visible = visible;
+    object.name ||= name;
+    root.add(object);
+    this.prepareMeshObject(root);
+    this.meshRoot.add(root);
     this.updateMeshClipping();
     this.updateMeshDisplay();
-    return object;
+    return root;
   }
 
   private renderMeshList(): void {
@@ -1631,6 +1629,7 @@ class MeshSliceViewer {
       input.addEventListener("change", () => {
         if (item.object === this.vxzMeshObject) {
           this.vxzMeshVisible.checked = input.checked;
+          item.object.visible = input.checked;
           this.updateMeshDisplay();
         } else {
           item.object.visible = input.checked;
@@ -1658,10 +1657,14 @@ class MeshSliceViewer {
   }
 
   private prepareMeshObject(object: THREE.Object3D): void {
+    const solidMeshes: THREE.Mesh<THREE.BufferGeometry, THREE.Material | THREE.Material[]>[] = [];
     object.traverse((child) => {
-      if (!isMesh(child)) {
-        return;
+      if (isMesh(child)) {
+        solidMeshes.push(child);
       }
+    });
+
+    for (const child of solidMeshes) {
 
       if (!child.geometry.attributes.normal) {
         child.geometry.computeVertexNormals();
@@ -1676,22 +1679,46 @@ class MeshSliceViewer {
         opacity: Number(this.meshOpacity.value),
         side: THREE.DoubleSide,
         clippingPlanes: this.meshClippingPlanes,
+        polygonOffset: true,
+        polygonOffsetFactor: 1,
+        polygonOffsetUnits: 1,
       });
 
-      const edges = new THREE.LineSegments(
-        new THREE.EdgesGeometry(child.geometry, 28),
-        new THREE.LineBasicMaterial({
-          color: "#202938",
-          transparent: true,
-          opacity: 0.74,
-          depthTest: true,
-          clippingPlanes: this.meshClippingPlanes,
-        }),
-      );
-      edges.name = "wireframe-overlay";
-      edges.userData.viewerRole = "wire";
-      child.add(edges);
-    });
+      const faceCount = Math.floor((child.geometry.index?.count
+        ?? child.geometry.getAttribute("position").count) / 3);
+      if (child.userData.preferLightweightWireframe
+        || faceCount >= LIGHTWEIGHT_WIREFRAME_FACE_THRESHOLD) {
+        const wireframe = new THREE.Mesh(
+          child.geometry,
+          new THREE.MeshBasicMaterial({
+            color: "#202938",
+            wireframe: true,
+            transparent: true,
+            opacity: 0.46,
+            depthTest: true,
+            clippingPlanes: this.meshClippingPlanes,
+          }),
+        );
+        wireframe.name = "wireframe-overlay";
+        wireframe.userData.viewerRole = "wire";
+        wireframe.renderOrder = 1;
+        child.add(wireframe);
+      } else {
+        const edges = new THREE.LineSegments(
+          new THREE.EdgesGeometry(child.geometry, 28),
+          new THREE.LineBasicMaterial({
+            color: "#202938",
+            transparent: true,
+            opacity: 0.74,
+            depthTest: true,
+            clippingPlanes: this.meshClippingPlanes,
+          }),
+        );
+        edges.name = "wireframe-overlay";
+        edges.userData.viewerRole = "wire";
+        child.add(edges);
+      }
+    }
   }
 
   private updateMeshDisplay(): void {
@@ -1707,13 +1734,13 @@ class MeshSliceViewer {
     this.meshRoot.traverse((child) => {
       const role = child.userData.viewerRole;
 
-      if (isMesh(child) && (role === "solid" || role === "vxzSolid")) {
-        child.visible = mode !== "wireframe";
-        if (role === "vxzSolid") {
-          child.visible = child.visible && this.vxzMeshVisible.checked;
-        }
+      if (isMesh(child) && role === "solid") {
+        // Keep the object traversable in wireframe mode so its wire overlay,
+        // which shares the decoded geometry, remains renderable.
+        child.visible = true;
         const material = child.material;
         if (isMeshMaterial(material)) {
+          material.visible = mode !== "wireframe";
           material.opacity = opacity;
           material.transparent = opacity < 1 || mode === "transparent";
           material.depthWrite = opacity >= 0.92 && mode !== "transparent";
@@ -1722,10 +1749,16 @@ class MeshSliceViewer {
         }
       }
 
-      if (isLineSegments(child) && role === "wire") {
+      if ((isLineSegments(child) || isMesh(child)) && role === "wire") {
         child.visible = mode === "wireframe" || mode === "solidWire";
         const material = child.material;
-        if (isLineMaterial(material)) {
+        if (isMeshMaterial(material)) {
+          material.opacity = mode === "wireframe" ? 0.76 : 0.46;
+          material.transparent = true;
+          material.depthWrite = false;
+          this.setMaterialClipping(material);
+          material.needsUpdate = true;
+        } else if (isLineMaterial(material)) {
           this.setMaterialClipping(material);
         }
       }
@@ -2539,6 +2572,28 @@ class MeshSliceViewer {
     this.camera.far = 80;
     this.camera.updateProjectionMatrix();
     this.controls.target.set(0, 0, 0);
+    this.controls.update();
+  }
+
+  private frameVxzMesh(): void {
+    const metadata = this.vxzMetadata;
+    if (!metadata) {
+      return;
+    }
+    const bounds = new THREE.Box3(
+      new THREE.Vector3(...metadata.boundsMin),
+      new THREE.Vector3(...metadata.boundsMax),
+    );
+    const center = bounds.getCenter(new THREE.Vector3());
+    const radius = Math.max(bounds.getSize(new THREE.Vector3()).length() / 2, 0.01);
+    const direction = this.camera.position.clone().sub(this.controls.target).normalize();
+    const verticalFov = THREE.MathUtils.degToRad(this.camera.fov);
+    const distance = radius / Math.sin(verticalFov / 2) * 1.08;
+    this.controls.target.copy(center);
+    this.camera.position.copy(center).addScaledVector(direction, distance);
+    this.camera.near = Math.max(0.001, distance / 1000);
+    this.camera.far = Math.max(80, distance + radius * 12);
+    this.camera.updateProjectionMatrix();
     this.controls.update();
   }
 

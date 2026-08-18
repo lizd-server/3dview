@@ -93,5 +93,25 @@ class BinaryContractTests(unittest.TestCase):
         np.testing.assert_array_equal(decoded_indices, indices)
 
 
+class ClusteredMeshPreviewTests(unittest.TestCase):
+    def test_dual_vertex_at_cell_boundary_joins_the_next_cluster(self):
+        coords = np.array([[1, 0, 0], [2, 0, 0]], dtype=np.int32)
+        dual = np.array([[255, 0, 0], [0, 0, 0]], dtype=np.uint8)
+        positions, vertex_clusters = vxz_worker._cluster_vertex_map(
+            coords, dual, resolution=8, cluster_width=2
+        )
+        self.assertEqual(len(positions), 1)
+        np.testing.assert_array_equal(vertex_clusters, [0, 0])
+
+    def test_duplicate_clustered_faces_are_removed_without_losing_winding(self):
+        triangles = np.array(
+            [[0, 1, 2], [2, 1, 0], [0, 2, 3]], dtype=np.int32
+        )
+        np.testing.assert_array_equal(
+            vxz_worker._deduplicate_triangles(triangles),
+            np.array([[0, 1, 2], [0, 2, 3]], dtype=np.int32),
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

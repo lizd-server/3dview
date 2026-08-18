@@ -57,6 +57,7 @@ export interface VolumeLabelMetadata {
 
 export interface VxzMetadata {
   formatVersion: number;
+  cacheVersion?: number;
   sourceName: string;
   resolution: number;
   resolutionSource?: "inferred" | "explicit";
@@ -66,6 +67,8 @@ export interface VxzMetadata {
   previewVoxelCount: number;
   previewVertexCount: number;
   previewFaceCount: number;
+  previewMode?: "vertex-clustered";
+  previewClusterWidth?: number;
   boundsMin: [number, number, number];
   boundsMax: [number, number, number];
   gridMin: [number, number, number];

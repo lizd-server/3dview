@@ -393,10 +393,17 @@ def _candidate_batches(
         yield quads
 
 
-def _triangulate_quads(quads: INT32, coords: INT32, dual_vertices: UINT8) -> INT32:
-    """Match the split heuristic used by gameAI-cvcg/trellis."""
+def _triangulate_quads(
+    quads: INT32,
+    coords: INT32,
+    dual_vertices: UINT8,
+    resolution: int,
+) -> INT32:
+    """Match the source decoder's float32 world-space split heuristic."""
     local_vertices = coords[quads].astype(np.float32)
     local_vertices += dual_vertices[quads].astype(np.float32) / np.float32(255.0)
+    local_vertices *= np.float32(1.0 / resolution)
+    local_vertices -= np.float32(0.5)
     v0, v1, v2, v3 = (local_vertices[:, index] for index in range(4))
 
     # Keep the source implementation's exact four-column normal comparison.
@@ -494,7 +501,12 @@ def decode_vxz(source: Path, target: Path, resolution: int | None, batch_size: i
             for quads in _candidate_batches(
                 keys, data.intersected, sorted_keys, sorted_to_original, batch_size
             ):
-                triangles = _triangulate_quads(quads, data.coords, data.dual_vertices)
+                triangles = _triangulate_quads(
+                    quads,
+                    data.coords,
+                    data.dual_vertices,
+                    resolution,
+                )
                 rows = np.empty(len(triangles), dtype=PLY_FACE_DTYPE)
                 rows["vertex_count"] = 3
                 rows["vertex_indices"] = triangles

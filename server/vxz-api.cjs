@@ -458,7 +458,7 @@ async function readCompleteCache(jobDir) {
   try {
     await Promise.all(required.map((name) => fsp.access(path.join(jobDir, name))));
     const metadata = JSON.parse(await fsp.readFile(path.join(jobDir, "metadata.json"), "utf8"));
-    return metadata.formatVersion === 1 ? metadata : null;
+    return metadata.formatVersion === 1 && metadata.cacheVersion === 3 ? metadata : null;
   } catch {
     return null;
   }

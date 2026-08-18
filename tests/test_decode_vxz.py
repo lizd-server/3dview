@@ -46,6 +46,27 @@ class FlexibleDualGridTopologyTests(unittest.TestCase):
             np.array([[0, 1, 2, 3]], dtype=np.int32),
             self.coords,
             np.zeros((4, 3), dtype=np.uint8),
+            1,
+        )
+        np.testing.assert_array_equal(
+            triangles,
+            np.array([[0, 1, 2], [0, 2, 3]], dtype=np.int32),
+        )
+
+    def test_quad_split_uses_source_float32_world_space_order(self):
+        coords = np.array(
+            [[520, 354, 776], [520, 354, 777], [520, 355, 777], [520, 355, 776]],
+            dtype=np.int32,
+        )
+        dual = np.array(
+            [[225, 118, 135], [225, 246, 8], [225, 118, 135], [225, 127, 127]],
+            dtype=np.uint8,
+        )
+        triangles = decode_vxz._triangulate_quads(
+            np.array([[0, 1, 2, 3]], dtype=np.int32),
+            coords,
+            dual,
+            1536,
         )
         np.testing.assert_array_equal(
             triangles,

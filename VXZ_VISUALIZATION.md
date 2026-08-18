@@ -10,7 +10,7 @@ paths:
 flowchart LR
     A["VXZ: SVO + dual vertices + signed intersections"] --> B["Local CPU decoder worker"]
     B --> C["Exact binary PLY export"]
-    B --> D["Chunked mesh cache: float32 positions + uint32 indices"]
+    B --> D["Connected mesh viewport LOD: float32 positions + uint32 indices"]
     B --> E["Voxel LOD cache: uint16 coords + uint8 attributes"]
     B --> F["Axis slice query"]
     D --> G["Three.js mesh view"]
@@ -28,7 +28,7 @@ The supplied files make the scale clear:
 
 Loading one of these as a single JavaScript `ArrayBuffer`, computing normals,
 and creating an `EdgesGeometry` copy would require several times the source
-size. Chunking and LOD are therefore required for a stable viewer.
+size. A coherent viewport LOD is therefore required for a stable viewer.
 
 ## Shared coordinate rules
 
@@ -162,12 +162,12 @@ Add VXZ routes to the existing loopback backend (and mirror them in Electron):
 | --- | --- |
 | `POST /api/vxz/open?name=...` | upload/hash a VXZ and start or reuse its cache job |
 | `GET /api/vxz/status?id=...` | decode/cache progress, errors, and metadata |
-| `GET /api/vxz/data?id=...&kind=mesh` | sampled dual-grid mesh preview |
+| `GET /api/vxz/data?id=...&kind=mesh` | connected, vertex-clustered dual-grid mesh LOD |
 | `GET /api/vxz/data?id=...&kind=voxels` | sampled voxel overview |
 | `GET /api/vxz/slice?id=...&axis=z&index=768` | exact compact records for one slice |
 
 Cache keys are SHA-256 hashes of the VXZ bytes. A cache entry contains
-`metadata.json`, memory-mapped exact sparse attributes, a mesh preview, and a
+`metadata.json`, memory-mapped exact sparse attributes, a mesh viewport LOD, and a
 voxel overview. An explicit grid resolution is folded into the cache key when
 the sparse occupied coordinates cannot determine the parent grid boundary.
 Cache writes are atomic.
@@ -198,7 +198,8 @@ overlay rather than two independently normalized views.
 1. **Decoder/export (done):** CPU VXZ read, signed dual-grid reconstruction,
    auto resolution, atomic binary PLY, directory/file-list input.
 2. **Integrated viewer (done):** upload/status/data/slice API, overview points,
-   a sampled mesh preview, exact native-resolution slices, progress, request
+   a connected vertex-clustered mesh LOD rendered through the normal mesh pipeline,
+   exact native-resolution slices, progress, request
    cancellation, cache reuse, visibility controls, and diagnostic colors.
 3. **Next LOD step:** ROI boxes and chunked exact mesh geometry loaded by
    camera/crop demand.

@@ -30,6 +30,7 @@ import {
   vxzQefRankDeficient,
   vxzQefRankDescription,
 } from "./vxz-qef-rank";
+import { vxzDataUrl } from "./vxz-data-url";
 
 type MeshMode = "solid" | "wireframe" | "transparent" | "solidWire";
 type SliceRenderMode = "pixels" | "cornerDots";
@@ -1323,7 +1324,7 @@ class MeshSliceViewer {
         this.setLoadProgress(loadTaskId, "Loading voxel preview", { loaded: 0, total: 2 });
       }
       const voxelResponse = await fetch(
-        `${VXZ_API_BASE}/data?id=${encodeURIComponent(job.id)}&kind=voxels`,
+        vxzDataUrl(VXZ_API_BASE, job.id, "voxels", job.metadata.formatVersion),
         { signal: controller.signal },
       );
       if (!voxelResponse.ok) {
@@ -1342,7 +1343,7 @@ class MeshSliceViewer {
         this.setLoadProgress(loadTaskId, "Loading mesh preview", { loaded: 1, total: 2 });
       }
       const meshResponse = await fetch(
-        `${VXZ_API_BASE}/data?id=${encodeURIComponent(job.id)}&kind=mesh`,
+        vxzDataUrl(VXZ_API_BASE, job.id, "mesh", job.metadata.formatVersion),
         { signal: controller.signal },
       );
       if (!meshResponse.ok) {

@@ -72,7 +72,7 @@ function createVxzApi(options = {}) {
     }
 
     if (url.pathname === "/api/vxz/slice") {
-      handleSlice(request, response, url);
+      runAsync(response, handleSlice(request, response, url));
       return true;
     }
 
@@ -284,8 +284,10 @@ function createVxzApi(options = {}) {
         return;
       }
       try {
-        const metadataPath = path.join(job.jobDir, "metadata.json");
-        job.metadata = JSON.parse(await fsp.readFile(metadataPath, "utf8"));
+        job.metadata = await readCompleteCache(job.jobDir);
+        if (!job.metadata) {
+          throw new Error("VXZ worker did not produce a complete current-format cache");
+        }
         job.status = "ready";
         job.stage = "ready";
         job.progress = 1;
@@ -306,17 +308,10 @@ function createVxzApi(options = {}) {
       sendText(response, 400, "Invalid VXZ job id");
       return;
     }
-    let job = jobs.get(id);
+    const job = await resolveJob(id);
     if (!job) {
-      const jobDir = path.join(cacheRoot, id);
-      const metadataPath = path.join(jobDir, "metadata.json");
-      if (!fs.existsSync(metadataPath)) {
-        sendText(response, 404, "Unknown VXZ job");
-        return;
-      }
-      const metadata = JSON.parse(await fsp.readFile(metadataPath, "utf8"));
-      job = readyJob(id, metadata.sourceName ?? "cached.vxz", jobDir, "", metadata);
-      jobs.set(id, job);
+      sendText(response, 404, "Unknown VXZ job");
+      return;
     }
     sendJson(response, 200, publicJob(job));
   }
@@ -326,12 +321,16 @@ function createVxzApi(options = {}) {
       sendText(response, 400, "Invalid VXZ data request");
       return;
     }
-    const job = jobs.get(id);
-    if (job && job.status !== "ready") {
+    const job = await resolveJob(id);
+    if (!job) {
+      sendText(response, 404, "Unknown VXZ job");
+      return;
+    }
+    if (job.status !== "ready") {
       sendText(response, 409, job.message);
       return;
     }
-    const target = path.join(cacheRoot, id, `${kind}.bin`);
+    const target = path.join(job.jobDir, `${kind}.bin`);
     try {
       const stat = await fsp.stat(target);
       response.writeHead(200, {
@@ -345,7 +344,7 @@ function createVxzApi(options = {}) {
     }
   }
 
-  function handleSlice(request, response, url) {
+  async function handleSlice(request, response, url) {
     const id = url.searchParams.get("id") ?? "";
     const axis = url.searchParams.get("axis") ?? "";
     const index = Number(url.searchParams.get("index"));
@@ -353,16 +352,16 @@ function createVxzApi(options = {}) {
       sendText(response, 400, "Invalid VXZ slice request");
       return;
     }
-    const job = jobs.get(id);
-    if (job && job.status !== "ready") {
-      sendText(response, 409, job.message);
-      return;
-    }
-    const jobDir = path.join(cacheRoot, id);
-    if (!fs.existsSync(path.join(jobDir, "metadata.json"))) {
+    const job = await resolveJob(id);
+    if (!job) {
       sendText(response, 404, "Unknown VXZ job");
       return;
     }
+    if (job.status !== "ready") {
+      sendText(response, 409, job.message);
+      return;
+    }
+    const jobDir = job.jobDir;
 
     activeSliceWorkers.get(id)?.kill("SIGTERM");
     const child = spawn(python, [workerScript, "slice", jobDir, axis, String(index)], {
@@ -416,6 +415,27 @@ function createVxzApi(options = {}) {
         child.kill("SIGTERM");
       }
     });
+  }
+
+  async function resolveJob(id) {
+    const existing = jobs.get(id);
+    if (existing) {
+      return existing;
+    }
+    const jobDir = path.join(cacheRoot, id);
+    const metadata = await readCompleteCache(jobDir);
+    if (!metadata) {
+      return null;
+    }
+    const job = readyJob(
+      id,
+      metadata.sourceName ?? "cached.vxz",
+      jobDir,
+      path.join(jobDir, "source.vxz"),
+      metadata,
+    );
+    jobs.set(id, job);
+    return job;
   }
 
   function dispose() {

@@ -87,9 +87,11 @@ coordinates:
   LOD targets about 5,000,000 triangles;
 - an exact on-demand `R x R` X/Y/Z slice queried from every sparse VXZ record.
 
-The Options panel can independently hide the mesh or voxels, change point
-size, and color voxels by occupancy, signed intersections, dual offset, or the
-optional `ovoxel_type` fallback case. Fallback colors distinguish the 3D
+The Options panel can independently hide the mesh, voxels, or projected dual
+vertices, change point size, and color voxels by occupancy, signed intersections,
+dual offset, or the optional `ovoxel_type` fallback case. Dual vertices are shown
+both on the native-resolution 2D slice and on its matching 3D slice plane.
+Fallback colors distinguish the 3D
 interior solution (0), 2D face solution (1), 1D edge solution (2), and corner
 solution (3); the option is disabled for older VXZ files without that field.
 The exact decoded mesh remains available through `decode_vxz.py`. The interactive

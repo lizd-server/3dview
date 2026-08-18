@@ -20,6 +20,7 @@ import {
 } from "./types";
 import { normalizeObjectToBounds } from "./mesh-normalization";
 import { parseNpy } from "./volumeLoader";
+import { projectVxzDualVertexToSlice } from "./vxz-dual-slice-projection";
 
 type MeshMode = "solid" | "wireframe" | "transparent" | "solidWire";
 type SliceRenderMode = "pixels" | "cornerDots";
@@ -68,6 +69,8 @@ const VXZ_VOXEL_HEADER_BYTES = 16;
 const VXZ_SLICE_HEADER_BYTES = 24;
 const VXZ_MESH_HEADER_BYTES = 16;
 const VXZ_VOXEL_RECORD_BYTES = 11;
+const VXZ_DUAL_MARKER_COLOR = "#ff2d55";
+const VXZ_DUAL_OVERLAY_MAX_SCALE_RESOLUTION = 4_096;
 const LIGHTWEIGHT_WIREFRAME_FACE_THRESHOLD = 250_000;
 const VXZ_FALLBACK_CASES: Array<{
   color: [number, number, number];
@@ -211,9 +214,11 @@ interface RemoteListResponse {
 class MeshSliceViewer {
   private readonly canvas = getElement<HTMLCanvasElement>("viewerCanvas");
   private readonly sliceCanvas = getElement<HTMLCanvasElement>("sliceCanvas");
+  private readonly vxzDualOverlay = getElement<HTMLCanvasElement>("vxzDualOverlay");
   private readonly workspace = getElement<HTMLElement>("workspace");
   private readonly slicePane = document.querySelector<HTMLElement>(".slice-pane");
   private readonly sliceContext: CanvasRenderingContext2D;
+  private readonly vxzDualOverlayContext: CanvasRenderingContext2D;
   private readonly sliceTextureCanvas = document.createElement("canvas");
   private readonly sliceTextureContext: CanvasRenderingContext2D;
   private readonly sliceTexture = new THREE.CanvasTexture(this.sliceTextureCanvas);
@@ -250,6 +255,7 @@ class MeshSliceViewer {
   private readonly vxzOptions = getElement<HTMLElement>("vxzOptions");
   private readonly vxzMeshVisible = getElement<HTMLInputElement>("vxzMeshVisible");
   private readonly vxzVoxelsVisible = getElement<HTMLInputElement>("vxzVoxelsVisible");
+  private readonly vxzDualVerticesVisible = getElement<HTMLInputElement>("vxzDualVerticesVisible");
   private readonly vxzColorMode = getElement<HTMLSelectElement>("vxzColorMode");
   private readonly vxzFallbackColorOption = getElement<HTMLOptionElement>("vxzFallbackColorOption");
   private readonly vxzPointSize = getElement<HTMLInputElement>("vxzPointSize");
@@ -294,6 +300,7 @@ class MeshSliceViewer {
   private vxzMetadata: VxzMetadata | null = null;
   private vxzMeshObject: THREE.Object3D | null = null;
   private vxzVoxelObject: THREE.Points<THREE.BufferGeometry, THREE.PointsMaterial> | null = null;
+  private vxzDualSliceObject: THREE.Points<THREE.BufferGeometry, THREE.PointsMaterial> | null = null;
   private vxzPreviewRecords: VxzPreviewRecords | null = null;
   private vxzSliceRecords = new Map<number, VxzSliceRecord>();
   private vxzLoadAbort: AbortController | null = null;
@@ -317,6 +324,11 @@ class MeshSliceViewer {
       throw new Error("Could not create a 2D canvas context.");
     }
     this.sliceContext = sliceContext;
+    const vxzDualOverlayContext = this.vxzDualOverlay.getContext("2d", { alpha: true });
+    if (!vxzDualOverlayContext) {
+      throw new Error("Could not create the VXZ dual vertex overlay context.");
+    }
+    this.vxzDualOverlayContext = vxzDualOverlayContext;
     const sliceTextureContext = this.sliceTextureCanvas.getContext("2d", { alpha: true });
     if (!sliceTextureContext) {
       throw new Error("Could not create a texture canvas context.");
@@ -410,6 +422,7 @@ class MeshSliceViewer {
   private bindEvents(): void {
     window.addEventListener("resize", () => {
       this.resize();
+      this.positionVxzDualOverlay();
       this.updateRemoteBrowserPosition();
     });
     document.addEventListener("pointerdown", (event) => this.closeFloatingPanelsForPointer(event), true);
@@ -515,6 +528,7 @@ class MeshSliceViewer {
     this.vxzVoxelsVisible.addEventListener("change", () => {
       this.voxelRoot.visible = this.vxzVoxelsVisible.checked;
     });
+    this.vxzDualVerticesVisible.addEventListener("change", () => this.updateVxzDualVisibility());
     this.vxzColorMode.addEventListener("change", () => {
       this.updateVxzVoxelColors();
       this.renderSlice();
@@ -1483,6 +1497,99 @@ class MeshSliceViewer {
     }
   }
 
+  private renderVxzDualVertices(
+    pixelPositions: Float32Array,
+    planePositions: Float32Array,
+    resolution: number,
+  ): void {
+    const overlayScale = resolution <= VXZ_DUAL_OVERLAY_MAX_SCALE_RESOLUTION ? 2 : 1;
+    this.vxzDualOverlay.width = resolution * overlayScale;
+    this.vxzDualOverlay.height = resolution * overlayScale;
+    this.vxzDualOverlay.style.width = `${resolution}px`;
+    this.vxzDualOverlay.style.height = `${resolution}px`;
+
+    const context = this.vxzDualOverlayContext;
+    context.setTransform(overlayScale, 0, 0, overlayScale, 0, 0);
+    context.clearRect(0, 0, resolution, resolution);
+    context.fillStyle = "rgba(15, 23, 42, 0.92)";
+    context.beginPath();
+    for (let offset = 0; offset < pixelPositions.length; offset += 2) {
+      const x = pixelPositions[offset];
+      const y = pixelPositions[offset + 1];
+      context.moveTo(x + 1.5, y);
+      context.arc(x, y, 1.5, 0, Math.PI * 2);
+    }
+    context.fill();
+    context.fillStyle = VXZ_DUAL_MARKER_COLOR;
+    context.beginPath();
+    for (let offset = 0; offset < pixelPositions.length; offset += 2) {
+      const x = pixelPositions[offset];
+      const y = pixelPositions[offset + 1];
+      context.moveTo(x + 0.72, y);
+      context.arc(x, y, 0.72, 0, Math.PI * 2);
+    }
+    context.fill();
+
+    this.disposeVxzDualSliceObject();
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.BufferAttribute(planePositions, 3));
+    geometry.computeBoundingSphere();
+    const material = new THREE.PointsMaterial({
+      color: VXZ_DUAL_MARKER_COLOR,
+      size: 3.5,
+      sizeAttenuation: false,
+      transparent: true,
+      opacity: 0.96,
+      depthTest: false,
+      depthWrite: false,
+    });
+    const points = new THREE.Points(geometry, material);
+    points.name = "VXZ slice dual vertices";
+    points.renderOrder = 30;
+    points.frustumCulled = false;
+    this.sliceRoot.add(points);
+    this.vxzDualSliceObject = points;
+    this.updateVxzDualVisibility();
+    requestAnimationFrame(() => this.positionVxzDualOverlay());
+  }
+
+  private positionVxzDualOverlay(): void {
+    if (!this.vxzMetadata || this.vxzDualOverlay.width <= 1) {
+      return;
+    }
+    this.vxzDualOverlay.style.left = `${this.sliceCanvas.offsetLeft + this.sliceCanvas.clientLeft}px`;
+    this.vxzDualOverlay.style.top = `${this.sliceCanvas.offsetTop + this.sliceCanvas.clientTop}px`;
+  }
+
+  private updateVxzDualVisibility(): void {
+    const visible = Boolean(this.vxzMetadata) && this.vxzDualVerticesVisible.checked;
+    this.vxzDualOverlay.classList.toggle("visible", visible && this.vxzDualOverlay.width > 1);
+    if (this.vxzDualSliceObject) {
+      this.vxzDualSliceObject.visible = visible;
+    }
+  }
+
+  private disposeVxzDualSliceObject(): void {
+    if (!this.vxzDualSliceObject) {
+      return;
+    }
+    this.sliceRoot.remove(this.vxzDualSliceObject);
+    this.vxzDualSliceObject.geometry.dispose();
+    this.vxzDualSliceObject.material.dispose();
+    this.vxzDualSliceObject = null;
+  }
+
+  private clearVxzDualVertices(): void {
+    this.disposeVxzDualSliceObject();
+    this.vxzDualOverlay.width = 1;
+    this.vxzDualOverlay.height = 1;
+    this.vxzDualOverlay.style.removeProperty("width");
+    this.vxzDualOverlay.style.removeProperty("height");
+    this.vxzDualOverlay.style.removeProperty("left");
+    this.vxzDualOverlay.style.removeProperty("top");
+    this.vxzDualOverlay.classList.remove("visible");
+  }
+
   private clearVxzSource(): void {
     this.vxzLoadToken += 1;
     this.vxzSliceToken += 1;
@@ -1495,6 +1602,7 @@ class MeshSliceViewer {
     this.vxzPreviewRecords = null;
     this.vxzFallbackColorOption.disabled = true;
     this.vxzSliceRecords.clear();
+    this.clearVxzDualVertices();
     this.clearGroup(this.voxelRoot);
     this.vxzVoxelObject = null;
     if (this.vxzMeshObject) {
@@ -2178,6 +2286,8 @@ class MeshSliceViewer {
       this.vxzSliceRecords.clear();
       const colorMode = this.vxzColorMode.value as VxzColorMode;
       const fallbackCounts = [0, 0, 0, 0];
+      const dualPixelPositions = new Float32Array(count * 2);
+      const dualPlanePositions = new Float32Array(count * 3);
       for (let recordIndex = 0; recordIndex < count; recordIndex += 1) {
         const offset = VXZ_SLICE_HEADER_BYTES + recordIndex * VXZ_VOXEL_RECORD_BYTES;
         const record: VxzSliceRecord = {
@@ -2217,6 +2327,18 @@ class MeshSliceViewer {
         textureImage.data[pixelOffset + 2] = b;
         textureImage.data[pixelOffset + 3] = 235;
         this.vxzSliceRecords.set(py * resolution + px, record);
+
+        const projection = projectVxzDualVertexToSlice(
+          this.sliceAxis,
+          record.coords,
+          record.dual,
+          resolution,
+        );
+        dualPixelPositions[recordIndex * 2] = projection.pixel[0];
+        dualPixelPositions[recordIndex * 2 + 1] = projection.pixel[1];
+        dualPlanePositions[recordIndex * 3] = projection.plane[0];
+        dualPlanePositions[recordIndex * 3 + 1] = projection.plane[1];
+        dualPlanePositions[recordIndex * 3 + 2] = 0;
       }
 
       this.sliceCanvas.width = resolution;
@@ -2231,6 +2353,7 @@ class MeshSliceViewer {
       this.sliceTexture.minFilter = THREE.NearestFilter;
       this.sliceTexture.generateMipmaps = false;
       this.sliceTexture.needsUpdate = true;
+      this.renderVxzDualVertices(dualPixelPositions, dualPlanePositions, resolution);
       this.sliceCanvas.classList.remove("empty-state", "corner-dot-mode");
       this.sliceCanvas.parentElement?.classList.remove("empty-state", "corner-dot-mode");
       this.sliceCanvas.classList.add("vxz-grid-mode");
@@ -2610,12 +2733,18 @@ class MeshSliceViewer {
     );
     const record = this.vxzSliceRecords.get(py * metadata.resolution + px);
     const world = grid.map((value) => -0.5 + (value + 0.5) / metadata.resolution);
+    const dualProjection = record
+      ? projectVxzDualVertexToSlice(this.sliceAxis, record.coords, record.dual, metadata.resolution)
+      : null;
     this.setInspector({
       Pixel: `[${px}, ${py}]`,
       Grid: `[${grid.join(", ")}]`,
       World: `[${world.map((value) => value.toFixed(6)).join(", ")}]`,
       Active: record ? "yes" : "no",
       "Dual uint8": record ? `[${record.dual.join(", ")}]` : "-",
+      "Dual slice pixel": dualProjection
+        ? `[${dualProjection.pixel.map((value) => value.toFixed(3)).join(", ")}]`
+        : "-",
       Intersections: record ? vxzIntersectionDescription(record.intersected) : "-",
       "Fallback case": record ? vxzFallbackDescription(record.ovoxelType) : "-",
     });

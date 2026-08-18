@@ -111,6 +111,10 @@
                     <input id="vxzVoxelsVisible" type="checkbox" />
                     <span>Voxels</span>
                   </label>
+                  <label class="check-control" title="Show each active voxel's decoded dual vertex projected onto the current slice plane">
+                    <input id="vxzDualVerticesVisible" type="checkbox" checked />
+                    <span>Dual vertices</span>
+                  </label>
                   <label class="select-control vxz-color-control">
                     <span>Voxel color</span>
                     <select id="vxzColorMode">
@@ -174,6 +178,7 @@
           </div>
           <div class="slice-canvas-shell empty-state">
             <canvas id="sliceCanvas" class="empty-state"></canvas>
+            <canvas id="vxzDualOverlay" aria-hidden="true"></canvas>
           </div>
           <div id="legendList" class="legend-list"></div>
           <dl id="inspectorList" class="inspector-list">

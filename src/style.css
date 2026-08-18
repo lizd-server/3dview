@@ -1019,6 +1019,7 @@ select {
 }
 
 .slice-canvas-shell {
+  position: relative;
   display: grid;
   place-items: center;
   min-height: 0;
@@ -1127,6 +1128,17 @@ select {
   height: auto;
   max-height: none;
   object-fit: none;
+}
+
+#vxzDualOverlay {
+  position: absolute;
+  z-index: 2;
+  display: none;
+  pointer-events: none;
+}
+
+#vxzDualOverlay.visible {
+  display: block;
 }
 
 .legend-list {

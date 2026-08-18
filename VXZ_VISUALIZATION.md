@@ -68,6 +68,20 @@ The Y-like display axis is flipped only because canvas rows grow downward.
 This is an exact integer permutation/flip, not a resampling step. Pixel center
 `(px + 0.5, py + 0.5)` maps to the corresponding voxel center.
 
+Dual vertices use the same axes continuously rather than snapping to the cell
+center. First compute `d = voxel_coord + dual_vertex / 255`. Their projected
+slice positions are:
+
+| slice | continuous canvas position | local 3D plane position |
+| --- | --- | --- |
+| `X = k` | `(d.z, R - d.y)` | `(2d.z/R - 1, 2d.y/R - 1)` |
+| `Y = k` | `(d.x, R - d.z)` | `(2d.x/R - 1, 2d.z/R - 1)` |
+| `Z = k` | `(d.x, R - d.y)` | `(2d.x/R - 1, 2d.y/R - 1)` |
+
+The normal coordinate is projected to the current cell-centered slice plane.
+The 2D marker layer is a separate transparent, supersampled canvas, so the
+underlying occupancy image keeps its native `1 pixel = 1 grid cell` contract.
+
 The 3D slice plane for index `k` is placed at the cell center:
 
 ```text

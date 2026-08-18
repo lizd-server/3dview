@@ -53,44 +53,63 @@ class BinaryContractTests(unittest.TestCase):
         self.coords = np.array([[1, 2, 3], [4, 5, 6]], dtype=np.int32)
         self.dual = np.array([[10, 20, 30], [40, 50, 60]], dtype=np.uint8)
         self.flags = np.array([9, 18], dtype=np.uint8)
+        self.ovoxel_type = np.array([0, 3], dtype=np.uint8)
 
     def test_voxel_preview_header_and_records(self):
         payload = vxz_worker.build_voxel_payload(
-            self.coords, self.dual, self.flags, resolution=8
+            self.coords, self.dual, self.flags, self.ovoxel_type, resolution=8
         )
         magic, version, count, resolution = struct.unpack_from("<4sIII", payload)
-        self.assertEqual((magic, version, count, resolution), (b"VXVP", 1, 2, 8))
+        self.assertEqual((magic, version, count, resolution), (b"VXVP", 2, 2, 8))
         records = np.frombuffer(payload, dtype=vxz_worker.VOXEL_RECORD_DTYPE, offset=16)
         np.testing.assert_array_equal(records["coords"], self.coords)
         np.testing.assert_array_equal(records["dual"], self.dual)
         np.testing.assert_array_equal(records["intersected"], self.flags)
+        np.testing.assert_array_equal(records["ovoxel_type"], self.ovoxel_type)
 
     def test_slice_payload_contains_only_matching_cells(self):
         payload = vxz_worker.build_slice_payload(
-            self.coords, self.dual, self.flags, resolution=8, axis="z", index=3
+            self.coords,
+            self.dual,
+            self.flags,
+            self.ovoxel_type,
+            resolution=8,
+            axis="z",
+            index=3,
         )
         magic, version, count, resolution, axis_index, slice_index = struct.unpack_from(
             "<4sIIIII", payload
         )
         self.assertEqual(
             (magic, version, count, resolution, axis_index, slice_index),
-            (b"VXSL", 1, 1, 8, 2, 3),
+            (b"VXSL", 2, 1, 8, 2, 3),
         )
         records = np.frombuffer(payload, dtype=vxz_worker.VOXEL_RECORD_DTYPE, offset=24)
         np.testing.assert_array_equal(records["coords"], self.coords[:1])
         np.testing.assert_array_equal(records["dual"], self.dual[:1])
         np.testing.assert_array_equal(records["intersected"], self.flags[:1])
+        np.testing.assert_array_equal(records["ovoxel_type"], self.ovoxel_type[:1])
 
     def test_mesh_payload_uses_float_positions_and_uint_indices(self):
         positions = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], dtype=np.float32)
         indices = np.array([0, 1, 2], dtype=np.uint32)
         payload = vxz_worker.build_mesh_payload(positions, indices)
         magic, version, vertex_count, index_count = struct.unpack_from("<4sIII", payload)
-        self.assertEqual((magic, version, vertex_count, index_count), (b"VXMP", 1, 3, 3))
+        self.assertEqual((magic, version, vertex_count, index_count), (b"VXMP", 2, 3, 3))
         decoded_positions = np.frombuffer(payload, "<f4", 9, 16).reshape(-1, 3)
         decoded_indices = np.frombuffer(payload, "<u4", 3, 16 + positions.nbytes)
         np.testing.assert_array_equal(decoded_positions, positions)
         np.testing.assert_array_equal(decoded_indices, indices)
+
+    def test_voxel_payload_rejects_misaligned_ovoxel_type(self):
+        with self.assertRaisesRegex(ValueError, "ovoxel_type must have shape"):
+            vxz_worker.build_voxel_payload(
+                self.coords,
+                self.dual,
+                self.flags,
+                self.ovoxel_type[:1],
+                resolution=8,
+            )
 
 
 class ClusteredMeshPreviewTests(unittest.TestCase):

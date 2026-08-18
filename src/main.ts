@@ -66,8 +66,18 @@ const DOT_STAMP: Array<{ dx: number; dy: number; alpha: number }> = [];
 const VXZ_VOXEL_HEADER_BYTES = 16;
 const VXZ_SLICE_HEADER_BYTES = 24;
 const VXZ_MESH_HEADER_BYTES = 16;
-const VXZ_VOXEL_RECORD_BYTES = 10;
+const VXZ_VOXEL_RECORD_BYTES = 11;
 const LIGHTWEIGHT_WIREFRAME_FACE_THRESHOLD = 250_000;
+const VXZ_FALLBACK_CASES: Array<{
+  color: [number, number, number];
+  cssColor: string;
+  label: string;
+}> = [
+  { color: [37, 99, 235], cssColor: "#2563eb", label: "0 · Interior (3D unconstrained)" },
+  { color: [16, 185, 129], cssColor: "#10b981", label: "1 · Voxel face (2D optimum)" },
+  { color: [245, 158, 11], cssColor: "#f59e0b", label: "2 · Voxel edge (1D optimum)" },
+  { color: [225, 29, 72], cssColor: "#e11d48", label: "3 · Voxel corner" },
+];
 
 if (IS_ELECTRON_APP) {
   document.documentElement.classList.add("electron-app");
@@ -130,12 +140,14 @@ interface VxzSliceRecord {
   coords: [number, number, number];
   dual: [number, number, number];
   intersected: number;
+  ovoxelType: number;
 }
 
 interface VxzPreviewRecords {
   coords: Uint16Array;
   dual: Uint8Array;
   intersected: Uint8Array;
+  ovoxelType: Uint8Array;
 }
 
 interface LoadTask {
@@ -237,6 +249,7 @@ class MeshSliceViewer {
   private readonly vxzMeshVisible = getElement<HTMLInputElement>("vxzMeshVisible");
   private readonly vxzVoxelsVisible = getElement<HTMLInputElement>("vxzVoxelsVisible");
   private readonly vxzColorMode = getElement<HTMLSelectElement>("vxzColorMode");
+  private readonly vxzFallbackColorOption = getElement<HTMLOptionElement>("vxzFallbackColorOption");
   private readonly vxzPointSize = getElement<HTMLInputElement>("vxzPointSize");
   private readonly vxzPointSizeValue = getElement<HTMLOutputElement>("vxzPointSizeValue");
   private readonly legendList = getElement<HTMLElement>("legendList");
@@ -1253,6 +1266,10 @@ class MeshSliceViewer {
 
       this.vxzJobId = job.id;
       this.vxzMetadata = job.metadata;
+      this.vxzFallbackColorOption.disabled = !job.metadata.hasOvoxelType;
+      if (this.vxzFallbackColorOption.disabled && this.vxzColorMode.value === "fallback") {
+        this.vxzColorMode.value = "occupancy";
+      }
       this.vxzSliceRecords.clear();
       this.vxzOptions.classList.remove("hidden");
       this.vxzMeshVisible.checked = true;
@@ -1349,7 +1366,7 @@ class MeshSliceViewer {
     const version = view.getUint32(4, true);
     const count = view.getUint32(8, true);
     const resolution = view.getUint32(12, true);
-    if (version !== 1 || !this.vxzMetadata || resolution !== this.vxzMetadata.resolution) {
+    if (version !== 2 || !this.vxzMetadata || resolution !== this.vxzMetadata.resolution) {
       throw new Error("Unsupported or inconsistent VXZ voxel preview");
     }
     if (buffer.byteLength !== VXZ_VOXEL_HEADER_BYTES + count * VXZ_VOXEL_RECORD_BYTES) {
@@ -1359,6 +1376,7 @@ class MeshSliceViewer {
     const coords = new Uint16Array(count * 3);
     const dual = new Uint8Array(count * 3);
     const intersected = new Uint8Array(count);
+    const ovoxelType = new Uint8Array(count);
     const positions = new Float32Array(count * 3);
     const colors = new Float32Array(count * 3);
     for (let record = 0; record < count; record += 1) {
@@ -1371,8 +1389,9 @@ class MeshSliceViewer {
         positions[record * 3 + axis] = (coord + 0.5) / resolution - 0.5;
       }
       intersected[record] = view.getUint8(offset + 9);
+      ovoxelType[record] = view.getUint8(offset + 10);
     }
-    this.vxzPreviewRecords = { coords, dual, intersected };
+    this.vxzPreviewRecords = { coords, dual, intersected, ovoxelType };
 
     this.clearGroup(this.voxelRoot);
     const geometry = new THREE.BufferGeometry();
@@ -1403,7 +1422,7 @@ class MeshSliceViewer {
     const vertexCount = view.getUint32(8, true);
     const indexCount = view.getUint32(12, true);
     const indexOffset = VXZ_MESH_HEADER_BYTES + vertexCount * 3 * 4;
-    if (version !== 1 || indexCount % 3 !== 0 || buffer.byteLength !== indexOffset + indexCount * 4) {
+    if (version !== 2 || indexCount % 3 !== 0 || buffer.byteLength !== indexOffset + indexCount * 4) {
       throw new Error("VXZ decoded mesh byte length is inconsistent");
     }
     const positions = new Float32Array(buffer, VXZ_MESH_HEADER_BYTES, vertexCount * 3);
@@ -1440,6 +1459,7 @@ class MeshSliceViewer {
       const [r, g, b] = vxzRecordColor(
         records.intersected[record],
         [records.dual[offset], records.dual[offset + 1], records.dual[offset + 2]],
+        records.ovoxelType[record],
         mode,
       );
       colors[offset] = r / 255;
@@ -1468,6 +1488,7 @@ class MeshSliceViewer {
     this.vxzJobId = null;
     this.vxzMetadata = null;
     this.vxzPreviewRecords = null;
+    this.vxzFallbackColorOption.disabled = true;
     this.vxzSliceRecords.clear();
     this.clearGroup(this.voxelRoot);
     this.vxzVoxelObject = null;
@@ -2100,7 +2121,7 @@ class MeshSliceViewer {
       const axisIndex = view.getUint32(16, true);
       const sliceIndex = view.getUint32(20, true);
       if (
-        version !== 1
+        version !== 2
         || payloadResolution !== resolution
         || axisIndex !== axisToIndex(this.sliceAxis)
         || sliceIndex !== this.sliceIndex
@@ -2119,6 +2140,7 @@ class MeshSliceViewer {
       }
       this.vxzSliceRecords.clear();
       const colorMode = this.vxzColorMode.value as VxzColorMode;
+      const fallbackCounts = [0, 0, 0, 0];
       for (let recordIndex = 0; recordIndex < count; recordIndex += 1) {
         const offset = VXZ_SLICE_HEADER_BYTES + recordIndex * VXZ_VOXEL_RECORD_BYTES;
         const record: VxzSliceRecord = {
@@ -2133,13 +2155,22 @@ class MeshSliceViewer {
             view.getUint8(offset + 8),
           ],
           intersected: view.getUint8(offset + 9),
+          ovoxelType: view.getUint8(offset + 10),
         };
         const [px, py] = gridToVxzSlicePixel(this.sliceAxis, record.coords, resolution);
         if (px < 0 || py < 0 || px >= resolution || py >= resolution) {
           throw new Error(`VXZ slice record is outside the r=${resolution} grid`);
         }
         const pixelOffset = (py * resolution + px) * 4;
-        const [r, g, b] = vxzRecordColor(record.intersected, record.dual, colorMode);
+        const [r, g, b] = vxzRecordColor(
+          record.intersected,
+          record.dual,
+          record.ovoxelType,
+          colorMode,
+        );
+        if (record.ovoxelType >= 0 && record.ovoxelType < fallbackCounts.length) {
+          fallbackCounts[record.ovoxelType] += 1;
+        }
         image.data[pixelOffset] = r;
         image.data[pixelOffset + 1] = g;
         image.data[pixelOffset + 2] = b;
@@ -2179,7 +2210,7 @@ class MeshSliceViewer {
       this.setSlicePlaneTextureEnabled(true);
       this.updateSlicePlaneOpacity();
       this.renderStats.textContent = `${this.sliceAxis.toUpperCase()}=${this.sliceIndex}, ${resolution} × ${resolution} exact cells, native 1 px = 1 grid cell, ${count.toLocaleString()} active, ${(performance.now() - started).toFixed(1)} ms`;
-      this.renderVxzLegend(count);
+      this.renderVxzLegend(count, fallbackCounts);
       this.setInspector();
     } catch (error) {
       if (!isAbortError(error) && token === this.vxzSliceToken) {
@@ -2192,12 +2223,22 @@ class MeshSliceViewer {
     }
   }
 
-  private renderVxzLegend(activeCount: number): void {
+  private renderVxzLegend(activeCount: number, fallbackCounts: number[]): void {
     this.legendList.replaceChildren();
-    const items = [
+    const items: Array<{ color: string; label: string; value: string }> = [
       { color: "#f4f7fa", label: "Inactive cell", value: (this.vxzMetadata!.resolution ** 2 - activeCount).toLocaleString() },
-      { color: "#1696c8", label: "Active O-Voxel cell", value: activeCount.toLocaleString() },
     ];
+    if (this.vxzColorMode.value === "fallback" && this.vxzMetadata?.hasOvoxelType) {
+      for (const [fallbackCase, definition] of VXZ_FALLBACK_CASES.entries()) {
+        items.push({
+          color: definition.cssColor,
+          label: definition.label,
+          value: (fallbackCounts[fallbackCase] ?? 0).toLocaleString(),
+        });
+      }
+    } else {
+      items.push({ color: "#1696c8", label: "Active O-Voxel cell", value: activeCount.toLocaleString() });
+    }
     for (const item of items) {
       const row = document.createElement("div");
       row.className = "legend-row";
@@ -2539,6 +2580,7 @@ class MeshSliceViewer {
       Active: record ? "yes" : "no",
       "Dual uint8": record ? `[${record.dual.join(", ")}]` : "-",
       Intersections: record ? vxzIntersectionDescription(record.intersected) : "-",
+      "Fallback case": record ? vxzFallbackDescription(record.ovoxelType) : "-",
     });
   }
 
@@ -3615,8 +3657,12 @@ function vxzSlicePixelToGrid(
 function vxzRecordColor(
   intersected: number,
   dual: [number, number, number],
+  ovoxelType: number,
   mode: VxzColorMode,
 ): [number, number, number] {
+  if (mode === "fallback") {
+    return VXZ_FALLBACK_CASES[ovoxelType]?.color ?? [100, 116, 139];
+  }
   if (mode === "dual") {
     return dual;
   }
@@ -3631,6 +3677,10 @@ function vxzRecordColor(
     }) as [number, number, number];
   }
   return [22, 150, 200];
+}
+
+function vxzFallbackDescription(ovoxelType: number): string {
+  return VXZ_FALLBACK_CASES[ovoxelType]?.label ?? "unavailable";
 }
 
 function vxzIntersectionDescription(intersected: number): string {

@@ -40,6 +40,8 @@ VXZ_MAGIC = b"VXZ"
 VXZ_VERSION = 0
 SUPPORTED_FILTER = "none"
 REQUIRED_ATTRIBUTES = {"dual_vertices": 3, "intersected": 1}
+OPTIONAL_OVOXEL_TYPE_ATTRIBUTE = "ovoxel_type"
+MISSING_OVOXEL_TYPE = np.uint8(255)
 DEFAULT_TOPOLOGY_BATCH_SIZE = 500_000
 MORTON_MASK = np.uint32(0x49249249)
 MORTON_SHIFT = np.uint64(21)
@@ -81,6 +83,7 @@ class VxzData:
     coords: INT32
     dual_vertices: UINT8
     intersected: UINT8
+    ovoxel_type: UINT8
     header: VxzHeader
 
 
@@ -142,6 +145,12 @@ def _parse_header(file: object, source: Path) -> VxzHeader:
             raise ValueError(
                 f"required attribute {name!r} must have {channels} channels, got {actual}"
             )
+    ovoxel_type_channels = dict(header.attributes).get(OPTIONAL_OVOXEL_TYPE_ATTRIBUTE)
+    if ovoxel_type_channels not in (None, 1):
+        raise ValueError(
+            f"optional attribute {OPTIONAL_OVOXEL_TYPE_ATTRIBUTE!r} must have 1 channel, "
+            f"got {ovoxel_type_channels}"
+        )
     return header
 
 
@@ -297,6 +306,10 @@ def read_vxz(source: Path) -> VxzData:
         coords = np.empty((header.num_voxel, 3), dtype=np.int32)
         dual_vertices = np.empty((header.num_voxel, 3), dtype=np.uint8)
         intersected = np.empty(header.num_voxel, dtype=np.uint8)
+        ovoxel_type = np.full(
+            header.num_voxel, MISSING_OVOXEL_TYPE, dtype=np.uint8
+        )
+        has_ovoxel_type = OPTIONAL_OVOXEL_TYPE_ATTRIBUTE in dict(header.attributes)
         depth = header.chunk_size.bit_length() - 1
         write_position = 0
 
@@ -309,6 +322,21 @@ def read_vxz(source: Path) -> VxzData:
                     raise ValueError(f"invalid dual_vertices shape in chunk {chunk_number}")
                 if chunk_intersected.shape != (len(chunk_dual), 1):
                     raise ValueError(f"invalid intersected shape in chunk {chunk_number}")
+                chunk_ovoxel_type = attributes.get(OPTIONAL_OVOXEL_TYPE_ATTRIBUTE)
+                if has_ovoxel_type:
+                    if chunk_ovoxel_type is None or chunk_ovoxel_type.shape != (
+                        len(chunk_dual),
+                        1,
+                    ):
+                        raise ValueError(
+                            f"invalid {OPTIONAL_OVOXEL_TYPE_ATTRIBUTE} shape in chunk "
+                            f"{chunk_number}"
+                        )
+                    if np.any(chunk_ovoxel_type > 3):
+                        raise ValueError(
+                            f"{OPTIONAL_OVOXEL_TYPE_ATTRIBUTE} values must be in [0, 3] "
+                            f"in chunk {chunk_number}"
+                        )
 
                 svo = np.frombuffer(
                     _stream_bytes(binary, header, chunk, "svo"), dtype=np.uint8
@@ -330,6 +358,8 @@ def read_vxz(source: Path) -> VxzData:
                 coords[write_position:end] = chunk_coords
                 dual_vertices[write_position:end] = chunk_dual
                 intersected[write_position:end] = chunk_intersected[:, 0]
+                if chunk_ovoxel_type is not None:
+                    ovoxel_type[write_position:end] = chunk_ovoxel_type[:, 0]
                 write_position = end
 
                 if chunk_number == len(header.chunks) or chunk_number % 16 == 0:
@@ -344,7 +374,7 @@ def read_vxz(source: Path) -> VxzData:
             f"chunk voxel counts total {write_position}, expected {header.num_voxel}"
         )
     print(f"  parsed VXZ in {time.perf_counter() - started:.1f}s", flush=True)
-    return VxzData(coords, dual_vertices, intersected, header)
+    return VxzData(coords, dual_vertices, intersected, ovoxel_type, header)
 
 
 def _pack_coords(coords: INT32) -> UINT64:

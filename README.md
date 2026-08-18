@@ -88,7 +88,10 @@ coordinates:
 - an exact on-demand `R x R` X/Y/Z slice queried from every sparse VXZ record.
 
 The Options panel can independently hide the mesh or voxels, change point
-size, and color voxels by occupancy, signed intersections, or dual offset.
+size, and color voxels by occupancy, signed intersections, dual offset, or the
+optional `ovoxel_type` fallback case. Fallback colors distinguish the 3D
+interior solution (0), 2D face solution (1), 1D edge solution (2), and corner
+solution (3); the option is disabled for older VXZ files without that field.
 The exact decoded mesh remains available through `decode_vxz.py`. The interactive
 viewer uses a vertex-clustered, connected viewport LOD from that decoded topology
 so the supplied 42.9-million-triangle sample does not allocate the full mesh in
@@ -101,7 +104,8 @@ VXZ slices are cell-centered. For resolution `R`, slice index `k` is placed at
 `-0.5 + (k + 0.5) / R`. The right pane is a native `R x R` scrollable canvas
 with nearest-neighbor rendering and no mipmaps: one CSS/image pixel is exactly
 one O-Voxel grid cell. Pointer inspection reports that pixel's exact integer
-grid coordinate, world-space cell center, dual vertex, and signed-edge bits.
+grid coordinate, world-space cell center, dual vertex, signed-edge bits, and
+fallback case when available.
 
 Decoded previews and exact sparse attributes are cached by VXZ SHA-256 under
 `~/Library/Caches/voxel-mesh-viewer/vxz`, so opening the same file again avoids

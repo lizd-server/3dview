@@ -24,7 +24,7 @@ export type CategoryKey =
   | "surfaceBoundaryOutside";
 
 export type SliceAxis = "x" | "y" | "z";
-export type VxzColorMode = "occupancy" | "edges" | "dual";
+export type VxzColorMode = "occupancy" | "edges" | "dual" | "fallback";
 export type VolumeVisualization =
   | "pipelineLabels"
   | "finalCclComponents"
@@ -69,6 +69,8 @@ export interface VxzMetadata {
   previewFaceCount: number;
   previewMode?: "vertex-clustered";
   previewClusterWidth?: number;
+  hasOvoxelType?: boolean;
+  ovoxelTypeCounts?: [number, number, number, number];
   boundsMin: [number, number, number];
   boundsMax: [number, number, number];
   gridMin: [number, number, number];

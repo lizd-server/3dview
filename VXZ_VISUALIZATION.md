@@ -89,7 +89,7 @@ Rendering requirements:
 - pointer inspection applies the table above directly and reports the exact
   `(x, y, z)` cell coordinate and its raw VXZ attributes.
 
-This convention is shared by occupancy, `dual_vertices`, signed-edge color,
+This convention is shared by occupancy, `dual_vertices`, `ovoxel_type`, signed-edge color,
 mesh cross-section overlays, the 2D slice, and the textured 3D slice plane.
 There must be no per-layer offset of half a voxel.
 
@@ -97,7 +97,8 @@ There must be no per-layer offset of half a voxel.
 
 The local worker reuses the CPU reconstruction in `decode_vxz.py`:
 
-1. Decode each VXZ SVO chunk and its `dual_vertices` / `intersected` streams.
+1. Decode each VXZ SVO chunk and its `dual_vertices` / `intersected` streams,
+   plus the optional one-channel `ovoxel_type` stream.
 2. Build the coordinate index and connect the four dual vertices around every
    signed x/y/z edge.
 3. Keep the current exact binary PLY output as the export/debug artifact.
@@ -134,21 +135,23 @@ three modes backed by the original sparse voxels:
   slice canvas plus the 3D slice plane. This is the most precise way to inspect
   occupancy at resolution 1536.
 
-Keep `dual_vertices` and `intersected` in the voxel payload so the UI can color
-by useful O-Voxel diagnostics:
+Keep `dual_vertices`, `intersected`, and `ovoxel_type` in the voxel payload so
+the UI can color by useful O-Voxel diagnostics:
 
 - active occupancy;
 - x/y/z intersected edge;
 - positive/negative intersection sign;
 - dual-vertex local offset;
+- fallback case: interior/face/edge/corner for values 0/1/2/3;
 - VXZ chunk id.
 
-A compact full-resolution voxel record is 10 bytes for these samples:
+A compact full-resolution voxel record is 11 bytes:
 
 ```text
 uint16 coord_x, coord_y, coord_z
 uint8 dual_x, dual_y, dual_z
 uint8 intersected
+uint8 ovoxel_type  # 255 when absent in an older VXZ
 ```
 
 LOD files contain the same record for one representative per coarser SVO cell,
@@ -185,7 +188,7 @@ Add one `Open VXZ` action and a VXZ panel with:
 - visibility toggles for `Mesh`, `Voxels`, and `Dual vertices`;
 - voxel mode: `Points`, `Boxes (ROI)`, or `Slice`;
 - LOD / point-budget and point-size controls;
-- color mode for occupancy, signed edges, dual offset, or chunk;
+- color mode for occupancy, fallback case, signed edges, dual offset, or chunk;
 - resolution, active-voxel, quad, triangle, cache, and GPU-memory estimates;
 - decode/export progress and cancellation.
 

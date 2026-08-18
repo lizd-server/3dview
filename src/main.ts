@@ -20,7 +20,10 @@ import {
 } from "./types";
 import { normalizeObjectToBounds } from "./mesh-normalization";
 import { parseNpy } from "./volumeLoader";
-import { projectVxzDualVertexToSlice } from "./vxz-dual-slice-projection";
+import {
+  projectVxzDualVertexToSlice,
+  vxzDualOverlayScale,
+} from "./vxz-dual-slice-projection";
 
 type MeshMode = "solid" | "wireframe" | "transparent" | "solidWire";
 type SliceRenderMode = "pixels" | "cornerDots";
@@ -70,7 +73,6 @@ const VXZ_SLICE_HEADER_BYTES = 24;
 const VXZ_MESH_HEADER_BYTES = 16;
 const VXZ_VOXEL_RECORD_BYTES = 11;
 const VXZ_DUAL_MARKER_COLOR = "#ff2d55";
-const VXZ_DUAL_OVERLAY_MAX_SCALE_RESOLUTION = 4_096;
 const LIGHTWEIGHT_WIREFRAME_FACE_THRESHOLD = 250_000;
 const VXZ_FALLBACK_CASES: Array<{
   color: [number, number, number];
@@ -528,7 +530,13 @@ class MeshSliceViewer {
     this.vxzVoxelsVisible.addEventListener("change", () => {
       this.voxelRoot.visible = this.vxzVoxelsVisible.checked;
     });
-    this.vxzDualVerticesVisible.addEventListener("change", () => this.updateVxzDualVisibility());
+    this.vxzDualVerticesVisible.addEventListener("change", () => {
+      if (this.vxzDualVerticesVisible.checked) {
+        this.renderSlice();
+      } else {
+        this.clearVxzDualVertices();
+      }
+    });
     this.vxzColorMode.addEventListener("change", () => {
       this.updateVxzVoxelColors();
       this.renderSlice();
@@ -1502,7 +1510,7 @@ class MeshSliceViewer {
     planePositions: Float32Array,
     resolution: number,
   ): void {
-    const overlayScale = resolution <= VXZ_DUAL_OVERLAY_MAX_SCALE_RESOLUTION ? 2 : 1;
+    const overlayScale = vxzDualOverlayScale(resolution);
     this.vxzDualOverlay.width = resolution * overlayScale;
     this.vxzDualOverlay.height = resolution * overlayScale;
     this.vxzDualOverlay.style.width = `${resolution}px`;
@@ -2239,6 +2247,7 @@ class MeshSliceViewer {
     if (!metadata || !jobId) {
       return;
     }
+    this.clearVxzDualVertices();
     const token = ++this.vxzSliceToken;
     this.vxzSliceAbort?.abort();
     const controller = new AbortController();
@@ -2286,8 +2295,9 @@ class MeshSliceViewer {
       this.vxzSliceRecords.clear();
       const colorMode = this.vxzColorMode.value as VxzColorMode;
       const fallbackCounts = [0, 0, 0, 0];
-      const dualPixelPositions = new Float32Array(count * 2);
-      const dualPlanePositions = new Float32Array(count * 3);
+      const showDualVertices = this.vxzDualVerticesVisible.checked;
+      const dualPixelPositions = showDualVertices ? new Float32Array(count * 2) : null;
+      const dualPlanePositions = showDualVertices ? new Float32Array(count * 3) : null;
       for (let recordIndex = 0; recordIndex < count; recordIndex += 1) {
         const offset = VXZ_SLICE_HEADER_BYTES + recordIndex * VXZ_VOXEL_RECORD_BYTES;
         const record: VxzSliceRecord = {
@@ -2328,17 +2338,19 @@ class MeshSliceViewer {
         textureImage.data[pixelOffset + 3] = 235;
         this.vxzSliceRecords.set(py * resolution + px, record);
 
-        const projection = projectVxzDualVertexToSlice(
-          this.sliceAxis,
-          record.coords,
-          record.dual,
-          resolution,
-        );
-        dualPixelPositions[recordIndex * 2] = projection.pixel[0];
-        dualPixelPositions[recordIndex * 2 + 1] = projection.pixel[1];
-        dualPlanePositions[recordIndex * 3] = projection.plane[0];
-        dualPlanePositions[recordIndex * 3 + 1] = projection.plane[1];
-        dualPlanePositions[recordIndex * 3 + 2] = 0;
+        if (dualPixelPositions && dualPlanePositions) {
+          const projection = projectVxzDualVertexToSlice(
+            this.sliceAxis,
+            record.coords,
+            record.dual,
+            resolution,
+          );
+          dualPixelPositions[recordIndex * 2] = projection.pixel[0];
+          dualPixelPositions[recordIndex * 2 + 1] = projection.pixel[1];
+          dualPlanePositions[recordIndex * 3] = projection.plane[0];
+          dualPlanePositions[recordIndex * 3 + 1] = projection.plane[1];
+          dualPlanePositions[recordIndex * 3 + 2] = 0;
+        }
       }
 
       this.sliceCanvas.width = resolution;
@@ -2353,7 +2365,9 @@ class MeshSliceViewer {
       this.sliceTexture.minFilter = THREE.NearestFilter;
       this.sliceTexture.generateMipmaps = false;
       this.sliceTexture.needsUpdate = true;
-      this.renderVxzDualVertices(dualPixelPositions, dualPlanePositions, resolution);
+      if (dualPixelPositions && dualPlanePositions && this.vxzDualVerticesVisible.checked) {
+        this.renderVxzDualVertices(dualPixelPositions, dualPlanePositions, resolution);
+      }
       this.sliceCanvas.classList.remove("empty-state", "corner-dot-mode");
       this.sliceCanvas.parentElement?.classList.remove("empty-state", "corner-dot-mode");
       this.sliceCanvas.classList.add("vxz-grid-mode");

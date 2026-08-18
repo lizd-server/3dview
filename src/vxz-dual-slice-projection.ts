@@ -1,8 +1,14 @@
 import type { SliceAxis } from "./types";
 
+const VXZ_DUAL_OVERLAY_MAX_BACKING_DIMENSION = 4_096;
+
 export interface VxzDualSliceProjection {
   pixel: readonly [number, number];
   plane: readonly [number, number];
+}
+
+export function vxzDualOverlayScale(resolution: number): 1 | 2 {
+  return resolution * 2 <= VXZ_DUAL_OVERLAY_MAX_BACKING_DIMENSION ? 2 : 1;
 }
 
 export function projectVxzDualVertexToSlice(

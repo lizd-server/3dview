@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { projectVxzDualVertexToSlice } from "../src/vxz-dual-slice-projection.ts";
+import {
+  projectVxzDualVertexToSlice,
+  vxzDualOverlayScale,
+} from "../src/vxz-dual-slice-projection.ts";
 
 function assertClose(actual: number, expected: number): void {
   assert.ok(Math.abs(actual - expected) < 1e-12, `${actual} != ${expected}`);
@@ -37,4 +40,11 @@ test("uses X horizontally and Z vertically on a Y slice", () => {
   assertClose(projection.pixel[1], 3.4);
   assertClose(projection.plane[0], -0.4);
   assertClose(projection.plane[1], -0.7);
+});
+
+test("caps the dual overlay backing store at 4096 pixels per side", () => {
+  assert.equal(vxzDualOverlayScale(1_536), 2);
+  assert.equal(vxzDualOverlayScale(2_048), 2);
+  assert.equal(vxzDualOverlayScale(2_049), 1);
+  assert.equal(vxzDualOverlayScale(4_096), 1);
 });

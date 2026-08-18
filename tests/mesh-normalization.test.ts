@@ -31,3 +31,25 @@ test("keeps source coordinates when no current bounds are available", () => {
   assert.deepEqual(object.position.toArray(), [7, 8, 9]);
   assert.deepEqual(object.scale.toArray(), [1, 1, 1]);
 });
+
+test("aligns centers when the imported object has a transformed parent", () => {
+  const parent = new THREE.Group();
+  parent.position.set(4, -3, 2);
+  parent.rotation.set(0.2, -0.4, 0.3);
+  parent.scale.set(2, 3, 4);
+  const object = new THREE.Mesh(new THREE.BoxGeometry(1, 2, 4));
+  object.position.set(2, 1, -3);
+  parent.add(object);
+  parent.updateMatrixWorld(true);
+  const targetBounds = new THREE.Box3(
+    new THREE.Vector3(-1, -2, -3),
+    new THREE.Vector3(1, 2, 3),
+  );
+
+  const normalized = normalizeObjectToBounds(object, targetBounds);
+
+  assert.equal(normalized, true);
+  const resultBounds = new THREE.Box3().setFromObject(object);
+  const center = resultBounds.getCenter(new THREE.Vector3());
+  assert.ok(center.distanceTo(new THREE.Vector3(0, 0, 0)) < 1e-9);
+});

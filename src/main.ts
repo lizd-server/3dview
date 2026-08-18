@@ -1595,9 +1595,13 @@ class MeshSliceViewer {
     const totalCount = this.currentMeshFiles.length;
     const clippingNote = this.activeVolume ? "; clipped by current slice" : "";
     const normalizationNote = options.normalizeToCurrentSize
-      ? normalizedCount > 0
+      ? normalizedCount === loadedCount
         ? "; normalized to current size"
-        : "; current size unavailable, kept source size"
+        : normalizedCount > 0
+          ? `; ${normalizedCount}/${loadedCount} normalized to current size`
+          : normalizationBounds
+            ? "; normalization skipped, invalid mesh or current bounds"
+            : "; current size unavailable, kept source size"
       : "";
     this.setStatus(
       loadedCount === totalCount

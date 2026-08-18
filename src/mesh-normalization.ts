@@ -31,7 +31,14 @@ export function normalizeObjectToBounds(
     .setFromObject(object)
     .getCenter(new THREE.Vector3());
   const targetCenter = targetBounds.getCenter(new THREE.Vector3());
-  object.position.add(targetCenter.sub(normalizedCenter));
+  if (object.parent) {
+    object.parent.updateWorldMatrix(true, false);
+    const localTargetCenter = object.parent.worldToLocal(targetCenter);
+    const localNormalizedCenter = object.parent.worldToLocal(normalizedCenter);
+    object.position.add(localTargetCenter.sub(localNormalizedCenter));
+  } else {
+    object.position.add(targetCenter.sub(normalizedCenter));
+  }
   object.updateMatrixWorld(true);
   return true;
 }

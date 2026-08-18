@@ -33,6 +33,76 @@ For a production build:
 npm run build
 ```
 
+## Decode O-Voxel VXZ on macOS
+
+`decode_vxz.py` is a CPU/NumPy reproduction of the decoder in
+`lizhuodong/ovoxel_produce`. It follows the signed Flexible Dual Grid format
+from `gameAI-cvcg/trellis`, but does not compile or call its CUDA extension, so
+it runs locally on Apple Silicon.
+
+Create a small isolated environment once:
+
+```bash
+uv venv --python 3.11 .venv-vxz
+uv pip install --python .venv-vxz/bin/python -r requirements-vxz.txt
+```
+
+Decode one `.vxz`, a recursively searched folder, or a text file containing
+one VXZ path per line:
+
+```bash
+.venv-vxz/bin/python decode_vxz.py input.vxz decoded
+.venv-vxz/bin/python decode_vxz.py /path/to/folder decoded --resolution auto
+.venv-vxz/bin/python decode_vxz.py vxz_files.txt decoded --resolution 1536
+```
+
+The output is binary little-endian PLY. Directory input preserves the relative
+folder structure, so repeated names such as `*/ovoxel.vxz` do not overwrite
+each other. Resolution defaults to automatic inference; pass it explicitly for
+VXZ data whose occupied coordinates do not reach the grid boundary.
+
+See [VXZ_VISUALIZATION.md](VXZ_VISUALIZATION.md) for the binary contracts,
+coordinate mapping, and exact slice acceptance criteria.
+
+## Open O-Voxel VXZ in the viewer
+
+After creating `.venv-vxz`, start the normal viewer and click **Open VXZ**:
+
+```bash
+npm run dev
+```
+
+VXZ itself does not store the parent grid resolution. Leave **VXZ resolution**
+in Options on Auto when occupied coordinates reach the grid boundary (as both
+supplied `r=1536` samples do). Otherwise enter the source resolution before
+opening the file; the explicit value is part of the cache key and is used by
+mesh, voxel, slice, and world-coordinate paths together.
+
+The integrated VXZ path loads three coordinated views from the same source
+coordinates:
+
+- a voxel overview capped at about 750,000 cell-centered points;
+- a dual-grid mesh preview capped at 2,000,000 triangles;
+- an exact on-demand `R x R` X/Y/Z slice queried from every sparse VXZ record.
+
+The Options panel can independently hide the mesh or voxels, change point
+size, and color voxels by occupancy, signed intersections, or dual offset.
+The exact decoded mesh remains available through `decode_vxz.py`; the 3D mesh
+inside the interactive viewer is deliberately a preview so the supplied
+42.9-million-triangle sample does not allocate the full mesh in browser memory.
+
+VXZ slices are cell-centered. For resolution `R`, slice index `k` is placed at
+`-0.5 + (k + 0.5) / R`. The right pane is a native `R x R` scrollable canvas
+with nearest-neighbor rendering and no mipmaps: one CSS/image pixel is exactly
+one O-Voxel grid cell. Pointer inspection reports that pixel's exact integer
+grid coordinate, world-space cell center, dual vertex, and signed-edge bits.
+
+Decoded previews and exact sparse attributes are cached by VXZ SHA-256 under
+`~/Library/Caches/voxel-mesh-viewer/vxz`, so opening the same file again avoids
+rebuilding topology. Preparations are serialized through one worker because a
+full-resolution VXZ can use substantial memory; slice requests remain
+on-demand and replace older requests for the same file.
+
 ## macOS App
 
 Create and install the standalone Electron macOS app:
@@ -41,7 +111,7 @@ Create and install the standalone Electron macOS app:
 npm run mac:app
 ```
 
-This writes `dist-mac/Voxel Mesh Viewer-darwin-<arch>/Voxel Mesh Viewer.app` and installs a copy to `~/Applications/Voxel Mesh Viewer.app`.
+This writes `dist-mac/Voxel Mesh Viewer-darwin-<arch>/Voxel Mesh Viewer.app` and installs a copy to `~/Applications/Voxel Mesh Viewer.app`. The app bundles a relocatable Python 3.11 + NumPy VXZ runtime, so the installed copy does not depend on the source checkout or `.venv-vxz` after packaging.
 
 Double-clicking the app opens a native macOS application window, not an external browser. The packaged app serves the built frontend and the read-only remote-file API inside the Electron main process on an app-owned loopback port, so PM2, Vite, and fixed ports such as `5173`/`5175` are not required for normal app use.
 

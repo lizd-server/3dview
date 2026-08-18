@@ -188,7 +188,8 @@ select {
 }
 
 .electron-app .toolbar-item[data-tool="folder"]::before,
-.electron-app .toolbar-item[data-tool="mesh"]::before {
+.electron-app .toolbar-item[data-tool="mesh"]::before,
+.electron-app .toolbar-item[data-tool="vxz"]::before {
   border: 1.4px solid currentcolor;
   border-radius: 2px;
   box-shadow: 3px -3px 0 -2px currentcolor;
@@ -196,6 +197,11 @@ select {
 
 .electron-app .toolbar-item[data-tool="mesh"]::before {
   transform: rotate(-8deg);
+}
+
+.electron-app .toolbar-item[data-tool="vxz"]::before {
+  border-radius: 50%;
+  transform: none;
 }
 
 .electron-app .toolbar-item[data-tool="remote"]::before {
@@ -214,7 +220,8 @@ select {
 
 .electron-app .file-control span,
 .electron-app .select-control span,
-.electron-app .range-control span {
+.electron-app .range-control span,
+.electron-app .number-control span {
   font-size: 10px;
   letter-spacing: 0.06em;
 }
@@ -242,7 +249,8 @@ select {
 }
 
 .electron-app .select-control span,
-.electron-app .range-control span {
+.electron-app .range-control span,
+.electron-app .number-control span {
   letter-spacing: 0;
   text-transform: none;
 }
@@ -337,6 +345,46 @@ select {
   min-width: 0;
 }
 
+.vxz-options {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding-left: 9px;
+  border-left: 1px solid #d8e1ec;
+  grid-column: 1 / -1;
+}
+
+.vxz-resolution-control {
+  width: 205px;
+}
+
+.vxz-resolution-control input {
+  width: 92px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.check-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+
+.check-control input {
+  margin: 0;
+  accent-color: #2467d6;
+}
+
+.vxz-color-control {
+  width: 132px;
+}
+
+.vxz-point-range {
+  grid-template-columns: auto 82px 30px;
+  width: 210px;
+}
+
 .file-group {
   flex: 0 0 auto;
   flex-wrap: wrap;
@@ -359,7 +407,8 @@ select {
 
 .file-control,
 .select-control,
-.range-control {
+.range-control,
+.number-control {
   display: flex;
   align-items: center;
   gap: 7px;
@@ -370,7 +419,8 @@ select {
 
 .file-control span,
 .select-control span,
-.range-control span {
+.range-control span,
+.number-control span {
   flex: 0 0 auto;
   color: #526174;
   font-size: 11px;
@@ -1062,6 +1112,19 @@ select {
   image-rendering: auto;
 }
 
+.slice-canvas-shell.vxz-grid-mode {
+  place-items: start;
+  overflow: auto;
+}
+
+#sliceCanvas.vxz-grid-mode {
+  width: auto;
+  max-width: none;
+  height: auto;
+  max-height: none;
+  object-fit: none;
+}
+
 .legend-list {
   display: flex;
   flex-wrap: wrap;
@@ -1190,6 +1253,7 @@ select {
   .select-control,
   .slice-mode-control,
   .range-control,
+  .number-control,
   .slice-range {
     flex-basis: 100%;
     width: 100%;

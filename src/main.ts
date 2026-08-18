@@ -14,6 +14,9 @@ import {
   type SliceAxis,
   type VolumeData,
   type VolumeLabelMetadata,
+  type VxzColorMode,
+  type VxzJobResponse,
+  type VxzMetadata,
 } from "./types";
 import { parseNpy } from "./volumeLoader";
 
@@ -28,6 +31,13 @@ const SCALAR_DISTANCE_BLACK_THRESHOLD = 0.1;
 const URL_PARAMS = new URLSearchParams(window.location.search);
 const IS_ELECTRON_APP = URL_PARAMS.has("electron");
 const REMOTE_API_BASE = URL_PARAMS.get("apiBase") ?? "http://127.0.0.1:5175/api/remote";
+const VXZ_API_BASE = (() => {
+  const value = new URL(REMOTE_API_BASE, window.location.href);
+  value.pathname = value.pathname.replace(/\/api\/remote\/?$/, "/api/vxz");
+  value.search = "";
+  value.hash = "";
+  return value.toString().replace(/\/$/, "");
+})();
 const DEFAULT_REMOTE_HOST = "hl_gpu_2";
 const REMOTE_DEFAULT_PATH = "/mnt/bn/vai3d-hl-1/Users/lizd/work/floodfill/output";
 const REMOTE_LAST_HOST_STORAGE_KEY = "voxel-mesh-viewer:last-remote-host";
@@ -36,6 +46,10 @@ const REMOTE_CACHE_DB_NAME = "voxel-mesh-viewer-cache";
 const REMOTE_CACHE_STORE = "remote-files";
 const REMOTE_CACHE_META_STORE = "remote-file-meta";
 const DOT_STAMP: Array<{ dx: number; dy: number; alpha: number }> = [];
+const VXZ_VOXEL_HEADER_BYTES = 16;
+const VXZ_SLICE_HEADER_BYTES = 24;
+const VXZ_MESH_HEADER_BYTES = 16;
+const VXZ_VOXEL_RECORD_BYTES = 10;
 
 if (IS_ELECTRON_APP) {
   document.documentElement.classList.add("electron-app");
@@ -92,6 +106,18 @@ interface MeshItem {
   id: number;
   name: string;
   object: THREE.Object3D;
+}
+
+interface VxzSliceRecord {
+  coords: [number, number, number];
+  dual: [number, number, number];
+  intersected: number;
+}
+
+interface VxzPreviewRecords {
+  coords: Uint16Array;
+  dual: Uint8Array;
+  intersected: Uint8Array;
 }
 
 interface LoadTask {
@@ -164,6 +190,8 @@ class MeshSliceViewer {
   private readonly renderStats = getElement<HTMLElement>("renderStats");
   private readonly folderInput = getElement<HTMLInputElement>("folderInput");
   private readonly meshInput = getElement<HTMLInputElement>("meshInput");
+  private readonly vxzInput = getElement<HTMLInputElement>("vxzInput");
+  private readonly vxzResolution = getElement<HTMLInputElement>("vxzResolution");
   private readonly topbar = document.querySelector<HTMLElement>(".topbar");
   private readonly remotePanel = document.querySelector<HTMLDetailsElement>(".remote-panel");
   private readonly remoteBrowser = getElement<HTMLElement>("remoteBrowser");
@@ -187,6 +215,12 @@ class MeshSliceViewer {
   private readonly sliceOpacity = getElement<HTMLInputElement>("sliceOpacity");
   private readonly sliceOpacityValue = getElement<HTMLOutputElement>("sliceOpacityValue");
   private readonly meshList = getElement<HTMLElement>("meshList");
+  private readonly vxzOptions = getElement<HTMLElement>("vxzOptions");
+  private readonly vxzMeshVisible = getElement<HTMLInputElement>("vxzMeshVisible");
+  private readonly vxzVoxelsVisible = getElement<HTMLInputElement>("vxzVoxelsVisible");
+  private readonly vxzColorMode = getElement<HTMLSelectElement>("vxzColorMode");
+  private readonly vxzPointSize = getElement<HTMLInputElement>("vxzPointSize");
+  private readonly vxzPointSizeValue = getElement<HTMLOutputElement>("vxzPointSizeValue");
   private readonly legendList = getElement<HTMLElement>("legendList");
   private readonly inspectorList = getElement<HTMLElement>("inspectorList");
 
@@ -195,6 +229,7 @@ class MeshSliceViewer {
   private readonly renderer = new THREE.WebGLRenderer({ canvas: this.canvas, antialias: true });
   private readonly controls = new OrbitControls(this.camera, this.canvas);
   private readonly meshRoot = new THREE.Group();
+  private readonly voxelRoot = new THREE.Group();
   private readonly sliceRoot = new THREE.Group();
   private readonly meshClipPlane = new THREE.Plane(new THREE.Vector3(0, 0, -1), 0);
   private readonly meshClippingPlanes = [this.meshClipPlane];
@@ -222,6 +257,16 @@ class MeshSliceViewer {
   private currentMeshFiles: SourceFile[] = [];
   private meshItems: MeshItem[] = [];
   private nextMeshId = 1;
+  private vxzJobId: string | null = null;
+  private vxzMetadata: VxzMetadata | null = null;
+  private vxzMeshObject: THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicMaterial> | null = null;
+  private vxzVoxelObject: THREE.Points<THREE.BufferGeometry, THREE.PointsMaterial> | null = null;
+  private vxzPreviewRecords: VxzPreviewRecords | null = null;
+  private vxzSliceRecords = new Map<number, VxzSliceRecord>();
+  private vxzLoadAbort: AbortController | null = null;
+  private vxzSliceAbort: AbortController | null = null;
+  private vxzLoadToken = 0;
+  private vxzSliceToken = 0;
   private remoteHost = DEFAULT_REMOTE_HOST;
   private remotePath = "";
   private remoteParent = "";
@@ -246,7 +291,7 @@ class MeshSliceViewer {
     this.sliceTextureContext = sliceTextureContext;
 
     this.scene.background = new THREE.Color("#f3f6fa");
-    this.scene.add(this.meshRoot, this.sliceRoot);
+    this.scene.add(this.meshRoot, this.voxelRoot, this.sliceRoot);
     document.body.append(this.remoteBrowser);
     this.remoteBrowser.classList.add("hidden");
 
@@ -342,6 +387,7 @@ class MeshSliceViewer {
 
     this.folderInput.addEventListener("change", () => void this.loadSelectedPipelineFolder());
     this.meshInput.addEventListener("change", () => void this.loadSelectedMeshFile());
+    this.vxzInput.addEventListener("change", () => void this.loadSelectedVxz());
     this.remotePanel?.addEventListener("toggle", () => this.updateRemoteBrowserPosition());
     getElement<HTMLButtonElement>("remoteGoButton").addEventListener("click", () => {
       void this.loadRemotePath(this.remotePathInput.value.trim());
@@ -407,7 +453,7 @@ class MeshSliceViewer {
         this.commitSliceInput();
         this.sliceValue.blur();
       } else if (event.key === "Escape") {
-        this.sliceValue.value = this.activeVolume ? String(this.sliceIndex) : "";
+        this.sliceValue.value = this.hasSliceSource() ? String(this.sliceIndex) : "";
         this.sliceValue.blur();
       }
     });
@@ -415,11 +461,28 @@ class MeshSliceViewer {
     this.meshModeSelect.addEventListener("change", () => this.updateMeshDisplay());
     this.meshOpacity.addEventListener("input", () => this.updateMeshDisplay());
     this.sliceOpacity.addEventListener("input", () => this.updateSlicePlaneOpacity());
+    this.vxzMeshVisible.addEventListener("change", () => {
+      if (this.vxzMeshObject) {
+        this.vxzMeshObject.visible = this.vxzMeshVisible.checked;
+        this.updateMeshDisplay();
+        this.renderMeshList();
+      }
+    });
+    this.vxzVoxelsVisible.addEventListener("change", () => {
+      this.voxelRoot.visible = this.vxzVoxelsVisible.checked;
+    });
+    this.vxzColorMode.addEventListener("change", () => {
+      this.updateVxzVoxelColors();
+      this.renderSlice();
+    });
+    this.vxzPointSize.addEventListener("input", () => this.updateVxzPointSize());
 
     getElement<HTMLButtonElement>("clearMeshButton").addEventListener("click", () => {
       this.clearGroup(this.meshRoot);
       this.currentMeshFiles = [];
       this.meshItems = [];
+      this.vxzMeshObject = null;
+      this.vxzMeshVisible.checked = false;
       this.renderMeshList();
       this.setStatus("Mesh cleared");
     });
@@ -471,6 +534,7 @@ class MeshSliceViewer {
   }
 
   private async loadPipelineFolder(files: SourceFile[], folderLabel?: string): Promise<void> {
+    this.clearVxzSource();
     const selection = findPipelineFolderSelection(files);
     const displayFolder = folderLabel || selection.directory || "(selected folder)";
     const statusFolder = compactFolderLabel(displayFolder);
@@ -1028,6 +1092,322 @@ class MeshSliceViewer {
     }
   }
 
+  private async loadSelectedVxz(): Promise<void> {
+    const file = this.vxzInput.files?.[0];
+    if (!file) {
+      return;
+    }
+
+    try {
+      await this.loadVxz(file);
+    } catch (error) {
+      if (!isAbortError(error)) {
+        this.setStatus(errorMessage(error));
+      }
+    } finally {
+      this.vxzInput.value = "";
+    }
+  }
+
+  private async loadVxz(file: File): Promise<void> {
+    const requestedResolution = this.requestedVxzResolution();
+    this.clearVxzSource();
+    this.activeVolume = null;
+    this.volumeLoadToken += 1;
+    this.volumeSlots = [];
+    this.labelMetadataByFileName.clear();
+    this.arraySelectRow.classList.add("hidden");
+    const token = ++this.vxzLoadToken;
+    const controller = new AbortController();
+    this.vxzLoadAbort = controller;
+    let loadTaskId: number | null = this.beginFileLoad(`Uploading VXZ ${file.name}`);
+    this.setStatus(`Uploading VXZ ${file.name}`);
+
+    try {
+      const openResponse = await fetch(
+        `${VXZ_API_BASE}/open?name=${encodeURIComponent(file.name)}`
+        + (requestedResolution === null ? "" : `&resolution=${requestedResolution}`),
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/octet-stream" },
+          body: file,
+          signal: controller.signal,
+        },
+      );
+      if (!openResponse.ok) {
+        throw new Error(await responseError(openResponse));
+      }
+      let job = await openResponse.json() as VxzJobResponse;
+      this.assertVxzJob(job);
+
+      while (job.status === "processing") {
+        if (token !== this.vxzLoadToken) {
+          throw new DOMException("Superseded VXZ load", "AbortError");
+        }
+        const progress = Number.isFinite(job.progress) ? clamp(job.progress, 0, 1) : 0;
+        if (loadTaskId !== null) {
+          this.setLoadProgress(loadTaskId, job.message || "Decoding VXZ", {
+            loaded: Math.round(progress * 1000),
+            total: 1000,
+          });
+        }
+        this.setStatus(job.message || "Decoding VXZ");
+        await delay(500);
+        const statusResponse = await fetch(
+          `${VXZ_API_BASE}/status?id=${encodeURIComponent(job.id)}`,
+          { cache: "no-store", signal: controller.signal },
+        );
+        if (!statusResponse.ok) {
+          throw new Error(await responseError(statusResponse));
+        }
+        job = await statusResponse.json() as VxzJobResponse;
+        this.assertVxzJob(job);
+      }
+
+      if (job.status === "failed" || !job.metadata) {
+        throw new Error(job.error || job.message || "VXZ decode failed");
+      }
+      if (token !== this.vxzLoadToken) {
+        throw new DOMException("Superseded VXZ load", "AbortError");
+      }
+
+      this.vxzJobId = job.id;
+      this.vxzMetadata = job.metadata;
+      this.vxzSliceRecords.clear();
+      this.vxzOptions.classList.remove("hidden");
+      this.vxzMeshVisible.checked = true;
+      this.vxzVoxelsVisible.checked = true;
+      this.voxelRoot.visible = true;
+      this.sliceRenderMode.value = "pixels";
+      this.sliceRenderMode.disabled = true;
+
+      if (loadTaskId !== null) {
+        this.setLoadProgress(loadTaskId, "Loading voxel preview", { loaded: 0, total: 2 });
+      }
+      const voxelResponse = await fetch(
+        `${VXZ_API_BASE}/data?id=${encodeURIComponent(job.id)}&kind=voxels`,
+        { signal: controller.signal },
+      );
+      if (!voxelResponse.ok) {
+        throw new Error(await responseError(voxelResponse));
+      }
+      const voxelBuffer = await voxelResponse.arrayBuffer();
+      if (token !== this.vxzLoadToken) {
+        throw new DOMException("Superseded VXZ load", "AbortError");
+      }
+      this.loadVxzVoxelPreview(voxelBuffer);
+
+      this.updateSliceControls(true);
+      this.updateSlicePlane();
+      this.renderSlice();
+      if (loadTaskId !== null) {
+        this.setLoadProgress(loadTaskId, "Loading mesh preview", { loaded: 1, total: 2 });
+      }
+      const meshResponse = await fetch(
+        `${VXZ_API_BASE}/data?id=${encodeURIComponent(job.id)}&kind=mesh`,
+        { signal: controller.signal },
+      );
+      if (!meshResponse.ok) {
+        throw new Error(await responseError(meshResponse));
+      }
+      const meshBuffer = await meshResponse.arrayBuffer();
+      if (token !== this.vxzLoadToken) {
+        throw new DOMException("Superseded VXZ load", "AbortError");
+      }
+      this.loadVxzMeshPreview(meshBuffer, file.name);
+      this.updateVxzPointSize();
+      this.updateMeshDisplay();
+
+      if (loadTaskId !== null) {
+        this.finishLoadProgress(loadTaskId, `Loaded VXZ ${file.name}`);
+        loadTaskId = null;
+      }
+      const metadata = this.vxzMetadata;
+      this.setStatus(
+        `Loaded ${file.name}: r=${metadata.resolution}, ${metadata.voxelCount.toLocaleString()} voxels, `
+        + `${metadata.faceCount.toLocaleString()} exact faces; preview ${metadata.previewFaceCount.toLocaleString()} faces`,
+      );
+    } catch (error) {
+      if (loadTaskId !== null) {
+        this.failLoadProgress(loadTaskId, errorMessage(error));
+        loadTaskId = null;
+      }
+      throw error;
+    } finally {
+      if (this.vxzLoadAbort === controller) {
+        this.vxzLoadAbort = null;
+      }
+      if (loadTaskId !== null) {
+        this.removeLoadProgress(loadTaskId);
+      }
+    }
+  }
+
+  private assertVxzJob(job: VxzJobResponse): void {
+    if (!job || typeof job.id !== "string" || !["processing", "ready", "failed"].includes(job.status)) {
+      throw new Error("VXZ backend returned an invalid job response");
+    }
+  }
+
+  private requestedVxzResolution(): number | null {
+    const value = this.vxzResolution.value.trim();
+    if (!value) {
+      return null;
+    }
+    const resolution = Number(value);
+    if (!Number.isInteger(resolution) || resolution <= 0) {
+      throw new Error("VXZ resolution must be a positive integer or left blank for Auto");
+    }
+    return resolution;
+  }
+
+  private loadVxzVoxelPreview(buffer: ArrayBuffer): void {
+    const view = new DataView(buffer);
+    assertBinaryMagic(view, "VXVP", VXZ_VOXEL_HEADER_BYTES);
+    const version = view.getUint32(4, true);
+    const count = view.getUint32(8, true);
+    const resolution = view.getUint32(12, true);
+    if (version !== 1 || !this.vxzMetadata || resolution !== this.vxzMetadata.resolution) {
+      throw new Error("Unsupported or inconsistent VXZ voxel preview");
+    }
+    if (buffer.byteLength !== VXZ_VOXEL_HEADER_BYTES + count * VXZ_VOXEL_RECORD_BYTES) {
+      throw new Error("VXZ voxel preview byte length is inconsistent");
+    }
+
+    const coords = new Uint16Array(count * 3);
+    const dual = new Uint8Array(count * 3);
+    const intersected = new Uint8Array(count);
+    const positions = new Float32Array(count * 3);
+    const colors = new Float32Array(count * 3);
+    for (let record = 0; record < count; record += 1) {
+      const offset = VXZ_VOXEL_HEADER_BYTES + record * VXZ_VOXEL_RECORD_BYTES;
+      for (let axis = 0; axis < 3; axis += 1) {
+        const coord = view.getUint16(offset + axis * 2, true);
+        const dualValue = view.getUint8(offset + 6 + axis);
+        coords[record * 3 + axis] = coord;
+        dual[record * 3 + axis] = dualValue;
+        positions[record * 3 + axis] = (coord + 0.5) / resolution - 0.5;
+      }
+      intersected[record] = view.getUint8(offset + 9);
+    }
+    this.vxzPreviewRecords = { coords, dual, intersected };
+
+    this.clearGroup(this.voxelRoot);
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+    geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+    geometry.computeBoundingSphere();
+    const material = new THREE.PointsMaterial({
+      size: Number(this.vxzPointSize.value),
+      sizeAttenuation: false,
+      vertexColors: true,
+      transparent: true,
+      opacity: 0.9,
+      depthWrite: true,
+      clippingPlanes: this.meshClippingPlanes,
+    });
+    const points = new THREE.Points(geometry, material);
+    points.name = "VXZ active voxels";
+    points.frustumCulled = true;
+    this.voxelRoot.add(points);
+    this.vxzVoxelObject = points;
+    this.updateVxzVoxelColors();
+  }
+
+  private loadVxzMeshPreview(buffer: ArrayBuffer, sourceName: string): void {
+    const view = new DataView(buffer);
+    assertBinaryMagic(view, "VXMP", VXZ_MESH_HEADER_BYTES);
+    const version = view.getUint32(4, true);
+    const vertexCount = view.getUint32(8, true);
+    const indexCount = view.getUint32(12, true);
+    const indexOffset = VXZ_MESH_HEADER_BYTES + vertexCount * 3 * 4;
+    if (version !== 1 || indexCount % 3 !== 0 || buffer.byteLength !== indexOffset + indexCount * 4) {
+      throw new Error("VXZ mesh preview byte length is inconsistent");
+    }
+    const positions = new Float32Array(buffer, VXZ_MESH_HEADER_BYTES, vertexCount * 3);
+    const indices = new Uint32Array(buffer, indexOffset, indexCount);
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+    geometry.setIndex(new THREE.BufferAttribute(indices, 1));
+    geometry.computeBoundingSphere();
+    const material = new THREE.MeshBasicMaterial({
+      color: "#aebbd0",
+      side: THREE.DoubleSide,
+      transparent: true,
+      opacity: Number(this.meshOpacity.value),
+      clippingPlanes: this.meshClippingPlanes,
+    });
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.name = `${sourceName} mesh preview`;
+    mesh.userData.viewerRole = "vxzSolid";
+    mesh.visible = this.vxzMeshVisible.checked;
+    this.meshRoot.add(mesh);
+    this.vxzMeshObject = mesh;
+    this.meshItems.push({
+      id: this.nextMeshId,
+      name: mesh.name,
+      object: mesh,
+    });
+    this.nextMeshId += 1;
+    this.renderMeshList();
+  }
+
+  private updateVxzVoxelColors(): void {
+    const records = this.vxzPreviewRecords;
+    const colorAttribute = this.vxzVoxelObject?.geometry.getAttribute("color");
+    if (!records || !(colorAttribute instanceof THREE.BufferAttribute)) {
+      return;
+    }
+    const colors = colorAttribute.array as Float32Array;
+    const mode = this.vxzColorMode.value as VxzColorMode;
+    for (let record = 0; record < records.intersected.length; record += 1) {
+      const offset = record * 3;
+      const [r, g, b] = vxzRecordColor(
+        records.intersected[record],
+        [records.dual[offset], records.dual[offset + 1], records.dual[offset + 2]],
+        mode,
+      );
+      colors[offset] = r / 255;
+      colors[offset + 1] = g / 255;
+      colors[offset + 2] = b / 255;
+    }
+    colorAttribute.needsUpdate = true;
+  }
+
+  private updateVxzPointSize(): void {
+    const size = Number(this.vxzPointSize.value);
+    this.vxzPointSizeValue.value = size.toFixed(1);
+    if (this.vxzVoxelObject) {
+      this.vxzVoxelObject.material.size = size;
+      this.vxzVoxelObject.material.needsUpdate = true;
+    }
+  }
+
+  private clearVxzSource(): void {
+    this.vxzLoadToken += 1;
+    this.vxzSliceToken += 1;
+    this.vxzLoadAbort?.abort();
+    this.vxzLoadAbort = null;
+    this.vxzSliceAbort?.abort();
+    this.vxzSliceAbort = null;
+    this.vxzJobId = null;
+    this.vxzMetadata = null;
+    this.vxzPreviewRecords = null;
+    this.vxzSliceRecords.clear();
+    this.clearGroup(this.voxelRoot);
+    this.vxzVoxelObject = null;
+    if (this.vxzMeshObject) {
+      const object = this.vxzMeshObject;
+      this.meshRoot.remove(object);
+      disposeObject(object);
+      this.meshItems = this.meshItems.filter((item) => item.object !== object);
+      this.vxzMeshObject = null;
+      this.renderMeshList();
+    }
+    this.vxzOptions.classList.add("hidden");
+    this.sliceRenderMode.disabled = false;
+  }
+
   private async loadSelectedMeshFile(): Promise<void> {
     const files = Array.from(this.meshInput.files ?? []) as SourceFile[];
     if (files.length === 0) {
@@ -1166,9 +1546,16 @@ class MeshSliceViewer {
 
       const input = document.createElement("input");
       input.type = "checkbox";
-      input.checked = item.object.visible;
+      input.checked = item.object === this.vxzMeshObject
+        ? this.vxzMeshVisible.checked
+        : item.object.visible;
       input.addEventListener("change", () => {
-        item.object.visible = input.checked;
+        if (item.object === this.vxzMeshObject) {
+          this.vxzMeshVisible.checked = input.checked;
+          this.updateMeshDisplay();
+        } else {
+          item.object.visible = input.checked;
+        }
       });
 
       const name = document.createElement("span");
@@ -1183,7 +1570,11 @@ class MeshSliceViewer {
   private setAllMeshesVisible(visible: boolean): void {
     for (const item of this.meshItems) {
       item.object.visible = visible;
+      if (item.object === this.vxzMeshObject) {
+        this.vxzMeshVisible.checked = visible;
+      }
     }
+    this.updateMeshDisplay();
     this.renderMeshList();
   }
 
@@ -1237,8 +1628,11 @@ class MeshSliceViewer {
     this.meshRoot.traverse((child) => {
       const role = child.userData.viewerRole;
 
-      if (isMesh(child) && role === "solid") {
+      if (isMesh(child) && (role === "solid" || role === "vxzSolid")) {
         child.visible = mode !== "wireframe";
+        if (role === "vxzSolid") {
+          child.visible = child.visible && this.vxzMeshVisible.checked;
+        }
         const material = child.material;
         if (isMeshMaterial(material)) {
           material.opacity = opacity;
@@ -1268,17 +1662,18 @@ class MeshSliceViewer {
   }
 
   private updateSliceControls(resetValue = false): void {
-    const dims = this.activeVolume ? this.getWorldDims() : [1, 1, 1] as [number, number, number];
+    const hasSource = this.hasSliceSource();
+    const dims = hasSource ? this.getWorldDims() : [1, 1, 1] as [number, number, number];
     const axisIndex = axisToIndex(this.sliceAxis);
     const max = dims[axisIndex] - 1;
 
-    this.sliceSlider.disabled = !this.activeVolume;
+    this.sliceSlider.disabled = !hasSource;
     this.sliceSlider.max = String(max);
-    this.sliceValue.disabled = !this.activeVolume;
+    this.sliceValue.disabled = !hasSource;
     this.sliceValue.max = String(max);
     this.sliceLabel.textContent = `${this.sliceAxis.toUpperCase()} slice`;
 
-    if (!this.activeVolume) {
+    if (!hasSource) {
       this.sliceSlider.value = "0";
       this.sliceValue.value = "";
       this.sliceValue.placeholder = "No slice";
@@ -1299,7 +1694,7 @@ class MeshSliceViewer {
   }
 
   private setSliceIndex(index: number): void {
-    const max = this.activeVolume ? this.getWorldDims()[axisToIndex(this.sliceAxis)] - 1 : 0;
+    const max = this.hasSliceSource() ? this.getWorldDims()[axisToIndex(this.sliceAxis)] - 1 : 0;
     this.sliceIndex = clamp(Math.round(index), 0, max);
     this.sliceSlider.value = String(this.sliceIndex);
     this.sliceValue.value = String(this.sliceIndex);
@@ -1308,8 +1703,8 @@ class MeshSliceViewer {
   }
 
   private commitSliceInput(): void {
-    if (!this.activeVolume || this.sliceValue.value === "") {
-      this.sliceValue.value = this.activeVolume ? String(this.sliceIndex) : "";
+    if (!this.hasSliceSource() || this.sliceValue.value === "") {
+      this.sliceValue.value = this.hasSliceSource() ? String(this.sliceIndex) : "";
       return;
     }
 
@@ -1322,11 +1717,16 @@ class MeshSliceViewer {
   }
 
   private updateSlicePlane(): void {
-    const dims = this.activeVolume ? this.getWorldDims() : [1, 1, 1] as [number, number, number];
-    const position = indexToWorld(this.sliceIndex, dims[axisToIndex(this.sliceAxis)]);
+    const dims = this.hasSliceSource() ? this.getWorldDims() : [1, 1, 1] as [number, number, number];
+    const position = this.activeIndexToWorld(
+      this.sliceIndex,
+      dims[axisToIndex(this.sliceAxis)],
+    );
 
     this.sliceRoot.position.set(0, 0, 0);
     this.sliceRoot.rotation.set(0, 0, 0);
+    const extentScale = this.vxzMetadata ? 0.5 : 1;
+    this.sliceRoot.scale.set(extentScale, extentScale, extentScale);
 
     if (this.sliceAxis === "x") {
       this.sliceRoot.position.x = position;
@@ -1342,7 +1742,7 @@ class MeshSliceViewer {
   }
 
   private updateMeshClipping(position = 0): void {
-    if (!this.activeVolume) {
+    if (!this.hasSliceSource()) {
       this.meshRoot.traverse((child) => {
         if (isMesh(child) && isMeshMaterial(child.material)) {
           this.setMaterialClipping(child.material);
@@ -1372,7 +1772,7 @@ class MeshSliceViewer {
   }
 
   private setMaterialClipping(material: THREE.Material): void {
-    const clippingPlanes = this.activeVolume ? this.meshClippingPlanes : null;
+    const clippingPlanes = this.hasSliceSource() ? this.meshClippingPlanes : null;
     if (material.clippingPlanes !== clippingPlanes) {
       material.clippingPlanes = clippingPlanes;
       material.needsUpdate = true;
@@ -1380,6 +1780,10 @@ class MeshSliceViewer {
   }
 
   private renderSlice(): void {
+    if (this.vxzMetadata && this.vxzJobId) {
+      void this.renderVxzSlice();
+      return;
+    }
     const volume = this.activeVolume;
     if (!volume) {
       this.clearSliceCanvas("Load a volume to see slice colors");
@@ -1393,6 +1797,8 @@ class MeshSliceViewer {
     }
 
     const started = performance.now();
+    this.sliceCanvas.classList.remove("vxz-grid-mode");
+    this.sliceCanvas.parentElement?.classList.remove("vxz-grid-mode");
     const dims = this.getWorldDims();
     const [width, height] = this.sliceAxis === "x"
       ? [dims[2], dims[1]]
@@ -1546,6 +1952,152 @@ class MeshSliceViewer {
     this.renderLegend(counts, labelCounts);
   }
 
+  private async renderVxzSlice(): Promise<void> {
+    const metadata = this.vxzMetadata;
+    const jobId = this.vxzJobId;
+    if (!metadata || !jobId) {
+      return;
+    }
+    const token = ++this.vxzSliceToken;
+    this.vxzSliceAbort?.abort();
+    const controller = new AbortController();
+    this.vxzSliceAbort = controller;
+    const started = performance.now();
+    const resolution = metadata.resolution;
+
+    try {
+      const response = await fetch(
+        `${VXZ_API_BASE}/slice?id=${encodeURIComponent(jobId)}&axis=${this.sliceAxis}&index=${this.sliceIndex}`,
+        { signal: controller.signal, cache: "no-store" },
+      );
+      if (!response.ok) {
+        throw new Error(await responseError(response));
+      }
+      const buffer = await response.arrayBuffer();
+      if (token !== this.vxzSliceToken) {
+        return;
+      }
+      const view = new DataView(buffer);
+      assertBinaryMagic(view, "VXSL", VXZ_SLICE_HEADER_BYTES);
+      const version = view.getUint32(4, true);
+      const count = view.getUint32(8, true);
+      const payloadResolution = view.getUint32(12, true);
+      const axisIndex = view.getUint32(16, true);
+      const sliceIndex = view.getUint32(20, true);
+      if (
+        version !== 1
+        || payloadResolution !== resolution
+        || axisIndex !== axisToIndex(this.sliceAxis)
+        || sliceIndex !== this.sliceIndex
+        || buffer.byteLength !== VXZ_SLICE_HEADER_BYTES + count * VXZ_VOXEL_RECORD_BYTES
+      ) {
+        throw new Error("VXZ slice payload is inconsistent with the requested grid slice");
+      }
+
+      const image = this.sliceContext.createImageData(resolution, resolution);
+      const textureImage = this.sliceTextureContext.createImageData(resolution, resolution);
+      for (let offset = 0; offset < image.data.length; offset += 4) {
+        image.data[offset] = 244;
+        image.data[offset + 1] = 247;
+        image.data[offset + 2] = 250;
+        image.data[offset + 3] = 255;
+      }
+      this.vxzSliceRecords.clear();
+      const colorMode = this.vxzColorMode.value as VxzColorMode;
+      for (let recordIndex = 0; recordIndex < count; recordIndex += 1) {
+        const offset = VXZ_SLICE_HEADER_BYTES + recordIndex * VXZ_VOXEL_RECORD_BYTES;
+        const record: VxzSliceRecord = {
+          coords: [
+            view.getUint16(offset, true),
+            view.getUint16(offset + 2, true),
+            view.getUint16(offset + 4, true),
+          ],
+          dual: [
+            view.getUint8(offset + 6),
+            view.getUint8(offset + 7),
+            view.getUint8(offset + 8),
+          ],
+          intersected: view.getUint8(offset + 9),
+        };
+        const [px, py] = gridToVxzSlicePixel(this.sliceAxis, record.coords, resolution);
+        if (px < 0 || py < 0 || px >= resolution || py >= resolution) {
+          throw new Error(`VXZ slice record is outside the r=${resolution} grid`);
+        }
+        const pixelOffset = (py * resolution + px) * 4;
+        const [r, g, b] = vxzRecordColor(record.intersected, record.dual, colorMode);
+        image.data[pixelOffset] = r;
+        image.data[pixelOffset + 1] = g;
+        image.data[pixelOffset + 2] = b;
+        image.data[pixelOffset + 3] = 255;
+        textureImage.data[pixelOffset] = r;
+        textureImage.data[pixelOffset + 1] = g;
+        textureImage.data[pixelOffset + 2] = b;
+        textureImage.data[pixelOffset + 3] = 235;
+        this.vxzSliceRecords.set(py * resolution + px, record);
+      }
+
+      this.sliceCanvas.width = resolution;
+      this.sliceCanvas.height = resolution;
+      this.sliceContext.imageSmoothingEnabled = false;
+      this.sliceContext.putImageData(image, 0, 0);
+      this.sliceTextureCanvas.width = resolution;
+      this.sliceTextureCanvas.height = resolution;
+      this.sliceTextureContext.imageSmoothingEnabled = false;
+      this.sliceTextureContext.putImageData(textureImage, 0, 0);
+      this.sliceTexture.magFilter = THREE.NearestFilter;
+      this.sliceTexture.minFilter = THREE.NearestFilter;
+      this.sliceTexture.generateMipmaps = false;
+      this.sliceTexture.needsUpdate = true;
+      this.sliceCanvas.classList.remove("empty-state", "corner-dot-mode");
+      this.sliceCanvas.parentElement?.classList.remove("empty-state", "corner-dot-mode");
+      this.sliceCanvas.classList.add("vxz-grid-mode");
+      this.sliceCanvas.parentElement?.classList.add("vxz-grid-mode");
+      this.workspace.classList.remove("single-pane");
+      this.slicePane?.classList.remove("empty-state");
+      const shell = this.sliceCanvas.parentElement;
+      if (shell) {
+        requestAnimationFrame(() => {
+          shell.scrollLeft = Math.max(0, (this.sliceCanvas.clientWidth - shell.clientWidth) / 2);
+          shell.scrollTop = Math.max(0, (this.sliceCanvas.clientHeight - shell.clientHeight) / 2);
+        });
+      }
+      this.setSlicePlaneTextureEnabled(true);
+      this.updateSlicePlaneOpacity();
+      this.renderStats.textContent = `${this.sliceAxis.toUpperCase()}=${this.sliceIndex}, ${resolution} × ${resolution} exact cells, native 1 px = 1 grid cell, ${count.toLocaleString()} active, ${(performance.now() - started).toFixed(1)} ms`;
+      this.renderVxzLegend(count);
+      this.setInspector();
+    } catch (error) {
+      if (!isAbortError(error) && token === this.vxzSliceToken) {
+        this.renderStats.textContent = `VXZ slice error: ${errorMessage(error)}`;
+      }
+    } finally {
+      if (this.vxzSliceAbort === controller) {
+        this.vxzSliceAbort = null;
+      }
+    }
+  }
+
+  private renderVxzLegend(activeCount: number): void {
+    this.legendList.replaceChildren();
+    const items = [
+      { color: "#f4f7fa", label: "Inactive cell", value: (this.vxzMetadata!.resolution ** 2 - activeCount).toLocaleString() },
+      { color: "#1696c8", label: "Active O-Voxel cell", value: activeCount.toLocaleString() },
+    ];
+    for (const item of items) {
+      const row = document.createElement("div");
+      row.className = "legend-row";
+      const swatch = document.createElement("span");
+      swatch.className = "swatch";
+      swatch.style.background = item.color;
+      const label = document.createElement("span");
+      label.textContent = item.label;
+      const value = document.createElement("strong");
+      value.textContent = item.value;
+      row.append(swatch, label, value);
+      this.legendList.append(row);
+    }
+  }
+
   private clearSliceCanvas(message: string): void {
     const width = 420;
     const height = 260;
@@ -1563,6 +2115,8 @@ class MeshSliceViewer {
     this.sliceContext.fillText(message, width / 2, height / 2);
     this.sliceCanvas.classList.remove("corner-dot-mode");
     this.sliceCanvas.parentElement?.classList.remove("corner-dot-mode");
+    this.sliceCanvas.classList.remove("vxz-grid-mode");
+    this.sliceCanvas.parentElement?.classList.remove("vxz-grid-mode");
     this.sliceCanvas.classList.add("empty-state");
     this.sliceCanvas.parentElement?.classList.add("empty-state");
   }
@@ -1734,6 +2288,10 @@ class MeshSliceViewer {
   }
 
   private getWorldDims(): [number, number, number] {
+    if (this.vxzMetadata) {
+      const resolution = this.vxzMetadata.resolution;
+      return [resolution, resolution, resolution];
+    }
     if (!this.activeVolume) {
       return [1, 1, 1];
     }
@@ -1742,7 +2300,22 @@ class MeshSliceViewer {
     return [nx, ny, nz];
   }
 
+  private hasSliceSource(): boolean {
+    return this.activeVolume !== null || this.vxzMetadata !== null;
+  }
+
+  private activeIndexToWorld(index: number, dimension: number): number {
+    if (this.vxzMetadata) {
+      return -0.5 + (index + 0.5) / this.vxzMetadata.resolution;
+    }
+    return indexToWorld(index, dimension);
+  }
+
   private inspectSlicePointer(event: PointerEvent): void {
+    if (this.vxzMetadata) {
+      this.inspectVxzSlicePointer(event);
+      return;
+    }
     if (!this.activeVolume || this.sliceCanvas.width === 0 || this.sliceCanvas.height === 0) {
       this.setInspector();
       return;
@@ -1816,6 +2389,42 @@ class MeshSliceViewer {
     };
 
     this.setInspector(values);
+  }
+
+  private inspectVxzSlicePointer(event: PointerEvent): void {
+    const metadata = this.vxzMetadata;
+    if (!metadata || this.sliceCanvas.width !== metadata.resolution || this.sliceCanvas.height !== metadata.resolution) {
+      this.setInspector();
+      return;
+    }
+    const rect = this.sliceCanvas.getBoundingClientRect();
+    const px = clamp(
+      Math.floor((event.clientX - rect.left) / rect.width * metadata.resolution),
+      0,
+      metadata.resolution - 1,
+    );
+    const py = clamp(
+      Math.floor((event.clientY - rect.top) / rect.height * metadata.resolution),
+      0,
+      metadata.resolution - 1,
+    );
+    const grid = vxzSlicePixelToGrid(
+      this.sliceAxis,
+      this.sliceIndex,
+      px,
+      py,
+      metadata.resolution,
+    );
+    const record = this.vxzSliceRecords.get(py * metadata.resolution + px);
+    const world = grid.map((value) => -0.5 + (value + 0.5) / metadata.resolution);
+    this.setInspector({
+      Pixel: `[${px}, ${py}]`,
+      Grid: `[${grid.join(", ")}]`,
+      World: `[${world.map((value) => value.toFixed(6)).join(", ")}]`,
+      Active: record ? "yes" : "no",
+      "Dual uint8": record ? `[${record.dual.join(", ")}]` : "-",
+      Intersections: record ? vxzIntersectionDescription(record.intersected) : "-",
+    });
   }
 
   private labelTextForValue(value: number, fallback: string): string {
@@ -2834,9 +3443,98 @@ function axisToIndex(axis: SliceAxis): 0 | 1 | 2 {
   return 2;
 }
 
+function gridToVxzSlicePixel(
+  axis: SliceAxis,
+  coords: [number, number, number],
+  resolution: number,
+): [number, number] {
+  const [x, y, z] = coords;
+  if (axis === "x") {
+    return [z, resolution - 1 - y];
+  }
+  if (axis === "y") {
+    return [x, resolution - 1 - z];
+  }
+  return [x, resolution - 1 - y];
+}
+
+function vxzSlicePixelToGrid(
+  axis: SliceAxis,
+  index: number,
+  px: number,
+  py: number,
+  resolution: number,
+): [number, number, number] {
+  const inverted = resolution - 1 - py;
+  if (axis === "x") {
+    return [index, inverted, px];
+  }
+  if (axis === "y") {
+    return [px, index, inverted];
+  }
+  return [px, inverted, index];
+}
+
+function vxzRecordColor(
+  intersected: number,
+  dual: [number, number, number],
+  mode: VxzColorMode,
+): [number, number, number] {
+  if (mode === "dual") {
+    return dual;
+  }
+  if (mode === "edges") {
+    if ((intersected & 0x07) === 0) {
+      return [92, 105, 122];
+    }
+    return [0, 1, 2].map((axis) => {
+      const present = (intersected & (1 << axis)) !== 0;
+      const positive = (intersected & (1 << (axis + 3))) !== 0;
+      return present ? positive ? 255 : 145 : 28;
+    }) as [number, number, number];
+  }
+  return [22, 150, 200];
+}
+
+function vxzIntersectionDescription(intersected: number): string {
+  const labels: string[] = [];
+  for (let axis = 0; axis < 3; axis += 1) {
+    if ((intersected & (1 << axis)) === 0) {
+      continue;
+    }
+    const sign = (intersected & (1 << (axis + 3))) !== 0 ? "+" : "−";
+    labels.push(`${["X", "Y", "Z"][axis]}${sign}`);
+  }
+  return labels.length ? labels.join(", ") : "none";
+}
+
+function assertBinaryMagic(view: DataView, expected: string, minimumBytes: number): void {
+  if (view.byteLength < minimumBytes) {
+    throw new Error(`${expected} payload is truncated`);
+  }
+  const actual = String.fromCharCode(
+    view.getUint8(0),
+    view.getUint8(1),
+    view.getUint8(2),
+    view.getUint8(3),
+  );
+  if (actual !== expected) {
+    throw new Error(`Expected ${expected} payload, got ${actual}`);
+  }
+}
+
+async function responseError(response: Response): Promise<string> {
+  const text = await response.text();
+  return text.trim() || `${response.status} ${response.statusText}`;
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+}
+
 function disposeObject(object: THREE.Object3D): void {
   object.traverse((child) => {
-    if (isMesh(child) || isLineSegments(child)) {
+    if (isMesh(child) || isLineSegments(child) || isPoints(child)) {
       child.geometry.dispose();
       const material = child.material;
       if (Array.isArray(material)) {
@@ -2854,6 +3552,10 @@ function isMesh(object: THREE.Object3D): object is THREE.Mesh<THREE.BufferGeomet
 
 function isLineSegments(object: THREE.Object3D): object is THREE.LineSegments {
   return (object as THREE.LineSegments).isLineSegments === true;
+}
+
+function isPoints(object: THREE.Object3D): object is THREE.Points<THREE.BufferGeometry, THREE.Material | THREE.Material[]> {
+  return (object as THREE.Points).isPoints === true;
 }
 
 function isMeshMaterial(material: THREE.Material | THREE.Material[]): material is THREE.MeshStandardMaterial {

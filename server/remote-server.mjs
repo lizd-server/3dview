@@ -1,10 +1,18 @@
 import { spawn } from "node:child_process";
 import http from "node:http";
 import { basename } from "node:path";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import vxzApiModule from "./vxz-api.cjs";
 
 const PORT = Number(process.env.REMOTE_VIEWER_PORT ?? 5175);
 const HOST = "127.0.0.1";
 const ALLOWED_HOSTS = new Set(["126781"]);
+const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const vxzApi = vxzApiModule.createVxzApi({
+  projectRoot: PROJECT_ROOT,
+  allowedOrigins: ["http://127.0.0.1:5173"],
+});
 
 const LIST_SCRIPT = `
 import json
@@ -56,8 +64,18 @@ with open(path, "rb") as handle:
 
 const server = http.createServer((request, response) => {
   response.setHeader("Access-Control-Allow-Origin", "http://127.0.0.1:5173");
-  response.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
+  response.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
   response.setHeader("Access-Control-Allow-Headers", "Content-Type");
+
+  if (!request.url) {
+    sendText(response, 400, "Missing URL");
+    return;
+  }
+  const url = new URL(request.url, `http://${HOST}:${PORT}`);
+  if (url.pathname.startsWith("/api/vxz/")) {
+    vxzApi.handle(request, response, url);
+    return;
+  }
 
   if (request.method === "OPTIONS") {
     response.writeHead(204);
@@ -65,12 +83,11 @@ const server = http.createServer((request, response) => {
     return;
   }
 
-  if (request.method !== "GET" || !request.url) {
+  if (request.method !== "GET") {
     sendText(response, 405, "Only GET is supported");
     return;
   }
 
-  const url = new URL(request.url, `http://${HOST}:${PORT}`);
   const host = url.searchParams.get("host") ?? "";
   if (!ALLOWED_HOSTS.has(host)) {
     sendText(response, 400, "Unsupported remote host");

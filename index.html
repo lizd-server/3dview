@@ -23,6 +23,10 @@
               <span>Add mesh</span>
               <input id="meshInput" type="file" accept=".ply,.obj,.stl" multiple />
             </label>
+            <label class="file-control toolbar-item" data-tool="vxz">
+              <span>Open VXZ</span>
+              <input id="vxzInput" type="file" accept=".vxz" />
+            </label>
           </div>
 
           <details class="remote-panel">
@@ -90,6 +94,33 @@
                   <input id="sliceOpacity" type="range" min="0" max="1" step="0.01" value="0.82" />
                   <output id="sliceOpacityValue">0.82</output>
                 </label>
+                <label class="number-control vxz-resolution-control">
+                  <span>VXZ resolution</span>
+                  <input id="vxzResolution" type="number" min="1" step="1" placeholder="Auto" aria-label="VXZ resolution" />
+                </label>
+                <div id="vxzOptions" class="vxz-options hidden" aria-label="VXZ display options">
+                  <label class="check-control">
+                    <input id="vxzMeshVisible" type="checkbox" checked />
+                    <span>VXZ mesh</span>
+                  </label>
+                  <label class="check-control">
+                    <input id="vxzVoxelsVisible" type="checkbox" checked />
+                    <span>Voxels</span>
+                  </label>
+                  <label class="select-control vxz-color-control">
+                    <span>Voxel color</span>
+                    <select id="vxzColorMode">
+                      <option value="occupancy">Occupancy</option>
+                      <option value="edges">Signed edges</option>
+                      <option value="dual">Dual offset</option>
+                    </select>
+                  </label>
+                  <label class="range-control vxz-point-range">
+                    <span>Point size</span>
+                    <input id="vxzPointSize" type="range" min="1" max="8" step="0.5" value="2.5" />
+                    <output id="vxzPointSizeValue">2.5</output>
+                  </label>
+                </div>
                 <button id="clearMeshButton" type="button">Clear mesh</button>
               </div>
             </details>

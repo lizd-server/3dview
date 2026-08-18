@@ -3,6 +3,7 @@ const { spawn } = require("node:child_process");
 const fs = require("node:fs");
 const http = require("node:http");
 const path = require("node:path");
+const { createVxzApi } = require("../server/vxz-api.cjs");
 
 const HOST = "127.0.0.1";
 const SSH_BIN = "/usr/bin/ssh";
@@ -10,6 +11,7 @@ const REMOTE_HOST_PATTERN = /^(?!-)[A-Za-z0-9_.@-]{1,128}$/;
 
 let mainWindow = null;
 let appServer = null;
+let vxzApi = null;
 
 app.setName("Voxel Mesh Viewer");
 
@@ -39,6 +41,7 @@ app.on("window-all-closed", () => {
 });
 
 app.on("before-quit", () => {
+  vxzApi?.dispose();
   appServer?.close();
 });
 
@@ -56,6 +59,14 @@ async function startAppServer() {
     throw new Error(`Missing built frontend at ${indexPath}. Run npm run build before packaging.`);
   }
 
+  const vxzRuntimeRoot = app.isPackaged
+    ? path.join(process.resourcesPath, ".vxz-runtime-build")
+    : app.getAppPath();
+  vxzApi = createVxzApi({
+    projectRoot: vxzRuntimeRoot,
+    cacheRoot: path.join(app.getPath("cache"), "vxz"),
+  });
+
   appServer = http.createServer((request, response) => {
     if (!request.url) {
       sendText(response, 400, "Missing URL");
@@ -63,6 +74,10 @@ async function startAppServer() {
     }
 
     const url = new URL(request.url, "http://viewer.local");
+    if (url.pathname.startsWith("/api/vxz/")) {
+      vxzApi.handle(request, response, url);
+      return;
+    }
     if (url.pathname.startsWith("/api/remote/")) {
       handleRemoteRequest(request, response, url);
       return;

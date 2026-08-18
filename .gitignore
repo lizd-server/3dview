@@ -1,6 +1,9 @@
 node_modules/
 dist/
 dist-mac/
+.venv-vxz/
+.vxz-runtime-build/
+__pycache__/
 .logs/
 assets/AppIcon.iconset/
 .DS_Store

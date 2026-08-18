@@ -60,7 +60,7 @@ test("all read routes reject an old on-disk VXZ cache after restart", async () =
   }
 });
 
-test("does not spawn a slice worker when the client aborts during cache restore", async () => {
+test("does not spawn a slice worker when the client aborts during cache restore", { timeout: 5_000 }, async () => {
   const root = await mkdtemp(path.join(tmpdir(), "vxz-cancelled-slice-"));
   const id = "b".repeat(64);
   let releaseCache = (_metadata: object) => {};
@@ -84,7 +84,12 @@ test("does not spawn a slice worker when the client aborts during cache restore"
       throw new Error("cancelled slice must not spawn");
     },
   });
+  let markServerAborted = () => {};
+  const serverAborted = new Promise<void>((resolve) => {
+    markServerAborted = resolve;
+  });
   const server = createServer((request, response) => {
+    request.once("aborted", markServerAborted);
     api.handle(request, response, new URL(request.url ?? "/", "http://127.0.0.1"));
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -97,16 +102,12 @@ test("does not spawn a slice worker when the client aborts during cache restore"
   ).catch((error) => error);
 
   try {
-    const restoreStarted = await Promise.race([
-      cacheStarted.then(() => true),
-      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 100)),
-    ]);
-    assert.equal(restoreStarted, true, "slice route did not use the injected cache reader");
+    await cacheStarted;
     controller.abort();
     await request;
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await serverAborted;
     releaseCache({ formatVersion: 3, cacheVersion: 5, resolution: 8 });
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await new Promise<void>((resolve) => setImmediate(resolve));
     assert.equal(spawnCount, 0);
   } finally {
     api.dispose();

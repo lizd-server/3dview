@@ -22,8 +22,8 @@ import decode_vxz
 
 Axis = Literal["x", "y", "z"]
 AXIS_TO_INDEX: dict[Axis, int] = {"x": 0, "y": 1, "z": 2}
-WORKER_FORMAT_VERSION = 2
-CACHE_FORMAT_VERSION = 4
+WORKER_FORMAT_VERSION = 3
+CACHE_FORMAT_VERSION = 5
 DEFAULT_POINT_BUDGET = 750_000
 DEFAULT_MESH_FACE_BUDGET = 5_000_000
 
@@ -33,6 +33,7 @@ VOXEL_RECORD_DTYPE = np.dtype(
         ("dual", "u1", (3,)),
         ("intersected", "u1"),
         ("ovoxel_type", "u1"),
+        ("qef_rank", "u1"),
     ],
     align=False,
 )
@@ -98,6 +99,7 @@ def _voxel_records(
     dual: NDArray[np.uint8],
     intersected: NDArray[np.uint8],
     ovoxel_type: NDArray[np.uint8],
+    qef_rank: NDArray[np.uint8],
 ) -> np.ndarray:
     if coords.shape != (len(coords), 3) or dual.shape != (len(coords), 3):
         raise ValueError("coords and dual must have shape [N, 3]")
@@ -105,6 +107,8 @@ def _voxel_records(
         raise ValueError("intersected must have shape [N]")
     if ovoxel_type.shape != (len(coords),):
         raise ValueError("ovoxel_type must have shape [N]")
+    if qef_rank.shape != (len(coords),):
+        raise ValueError("qef_rank must have shape [N]")
     if len(coords) and (np.any(coords < 0) or np.any(coords > np.iinfo(np.uint16).max)):
         raise ValueError("browser voxel records require uint16 coordinates")
     records = np.empty(len(coords), dtype=VOXEL_RECORD_DTYPE)
@@ -112,6 +116,7 @@ def _voxel_records(
     records["dual"] = dual
     records["intersected"] = intersected
     records["ovoxel_type"] = ovoxel_type
+    records["qef_rank"] = qef_rank
     return records
 
 
@@ -120,9 +125,10 @@ def build_voxel_payload(
     dual: NDArray[np.uint8],
     intersected: NDArray[np.uint8],
     ovoxel_type: NDArray[np.uint8],
+    qef_rank: NDArray[np.uint8],
     resolution: int,
 ) -> bytes:
-    records = _voxel_records(coords, dual, intersected, ovoxel_type)
+    records = _voxel_records(coords, dual, intersected, ovoxel_type, qef_rank)
     header = struct.pack("<4sIII", b"VXVP", WORKER_FORMAT_VERSION, len(records), resolution)
     return header + records.tobytes()
 
@@ -132,6 +138,7 @@ def build_slice_payload(
     dual: NDArray[np.uint8],
     intersected: NDArray[np.uint8],
     ovoxel_type: NDArray[np.uint8],
+    qef_rank: NDArray[np.uint8],
     resolution: int,
     axis: Axis,
     index: int,
@@ -141,7 +148,11 @@ def build_slice_payload(
     axis_index = AXIS_TO_INDEX[axis]
     selected = np.flatnonzero(coords[:, axis_index] == index)
     records = _voxel_records(
-        coords[selected], dual[selected], intersected[selected], ovoxel_type[selected]
+        coords[selected],
+        dual[selected],
+        intersected[selected],
+        ovoxel_type[selected],
+        qef_rank[selected],
     )
     header = struct.pack(
         "<4sIIIII",
@@ -353,6 +364,7 @@ def prepare_cache(
     _atomic_save_array(cache_dir / "dual.npy", data.dual_vertices)
     _atomic_save_array(cache_dir / "intersected.npy", data.intersected)
     _atomic_save_array(cache_dir / "ovoxel_type.npy", data.ovoxel_type)
+    _atomic_save_array(cache_dir / "qef_rank.npy", data.qef_rank)
 
     preview_indices = _preview_indices(len(data.coords), point_budget)
     voxel_payload = build_voxel_payload(
@@ -360,6 +372,7 @@ def prepare_cache(
         data.dual_vertices[preview_indices],
         data.intersected[preview_indices],
         data.ovoxel_type[preview_indices],
+        data.qef_rank[preview_indices],
         resolution,
     )
     _atomic_write_bytes(cache_dir / "voxels.bin", voxel_payload)
@@ -424,6 +437,10 @@ def prepare_cache(
         "ovoxelTypeCounts": [
             int(np.count_nonzero(data.ovoxel_type == case)) for case in range(4)
         ],
+        "hasQefRank": bool(np.any(data.qef_rank != decode_vxz.MISSING_QEF_RANK)),
+        "qefRankCounts": [
+            int(np.count_nonzero(data.qef_rank == rank)) for rank in range(4)
+        ],
         "boundsMin": bounds_min.tolist(),
         "boundsMax": bounds_max.tolist(),
         "gridMin": data.coords.min(axis=0).tolist(),
@@ -445,6 +462,7 @@ def load_cached_arrays(
     NDArray[np.uint8],
     NDArray[np.uint8],
     NDArray[np.uint8],
+    NDArray[np.uint8],
     dict[str, object],
 ]:
     metadata = json.loads((cache_dir / "metadata.json").read_text(encoding="utf-8"))
@@ -456,16 +474,20 @@ def load_cached_arrays(
     ovoxel_type = np.load(
         cache_dir / "ovoxel_type.npy", mmap_mode="r", allow_pickle=False
     )
-    return coords, dual, intersected, ovoxel_type, metadata
+    qef_rank = np.load(cache_dir / "qef_rank.npy", mmap_mode="r", allow_pickle=False)
+    return coords, dual, intersected, ovoxel_type, qef_rank, metadata
 
 
 def slice_from_cache(cache_dir: Path, axis: Axis, index: int) -> bytes:
-    coords, dual, intersected, ovoxel_type, metadata = load_cached_arrays(cache_dir)
+    coords, dual, intersected, ovoxel_type, qef_rank, metadata = load_cached_arrays(
+        cache_dir
+    )
     return build_slice_payload(
         coords,
         dual,
         intersected,
         ovoxel_type,
+        qef_rank,
         int(metadata["resolution"]),
         axis,
         index,

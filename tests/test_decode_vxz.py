@@ -10,8 +10,13 @@ import decode_vxz
 import vxz_worker
 
 
-class OptionalOvoxelTypeTests(unittest.TestCase):
-    def write_vxz(self, path: Path, ovoxel_type: np.ndarray | None) -> None:
+class OptionalVoxelDiagnosticsTests(unittest.TestCase):
+    def write_vxz(
+        self,
+        path: Path,
+        ovoxel_type: np.ndarray | None,
+        qef_rank: np.ndarray | None = None,
+    ) -> None:
         attributes = [["dual_vertices", 3], ["intersected", 1]]
         columns = [
             np.array(
@@ -27,6 +32,9 @@ class OptionalOvoxelTypeTests(unittest.TestCase):
         if ovoxel_type is not None:
             attributes.append(["ovoxel_type", 1])
             columns.append(ovoxel_type.reshape(-1, 1))
+        if qef_rank is not None:
+            attributes.append(["qef_rank", 1])
+            columns.append(qef_rank.reshape(-1, 1))
         rows = np.column_stack(columns).astype(np.uint8, copy=False)
         svo = bytes([0b00001111])
         binary = svo + rows.tobytes()
@@ -61,6 +69,13 @@ class OptionalOvoxelTypeTests(unittest.TestCase):
             self.write_vxz(source, expected)
             np.testing.assert_array_equal(decode_vxz.read_vxz(source).ovoxel_type, expected)
 
+    def test_reads_optional_qef_rank(self):
+        expected = np.array([0, 1, 2, 3], dtype=np.uint8)
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "with-qef-rank.vxz"
+            self.write_vxz(source, None, expected)
+            np.testing.assert_array_equal(decode_vxz.read_vxz(source).qef_rank, expected)
+
     def test_old_vxz_uses_unavailable_sentinel(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "without-type.vxz"
@@ -69,11 +84,26 @@ class OptionalOvoxelTypeTests(unittest.TestCase):
                 decode_vxz.read_vxz(source).ovoxel_type,
                 np.full(4, decode_vxz.MISSING_OVOXEL_TYPE, dtype=np.uint8),
             )
+            np.testing.assert_array_equal(
+                decode_vxz.read_vxz(source).qef_rank,
+                np.full(4, decode_vxz.MISSING_QEF_RANK, dtype=np.uint8),
+            )
 
     def test_rejects_invalid_ovoxel_type(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "invalid-type.vxz"
             self.write_vxz(source, np.array([0, 1, 2, 4], dtype=np.uint8))
+            with self.assertRaisesRegex(ValueError, "values must be in \\[0, 3\\]"):
+                decode_vxz.read_vxz(source)
+
+    def test_rejects_invalid_qef_rank(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "invalid-qef-rank.vxz"
+            self.write_vxz(
+                source,
+                None,
+                np.array([0, 1, 2, 4], dtype=np.uint8),
+            )
             with self.assertRaisesRegex(ValueError, "values must be in \\[0, 3\\]"):
                 decode_vxz.read_vxz(source)
 
@@ -86,8 +116,28 @@ class OptionalOvoxelTypeTests(unittest.TestCase):
             metadata = vxz_worker.prepare_cache(source, root / "cache")
             self.assertTrue(metadata["hasOvoxelType"])
             self.assertEqual(metadata["ovoxelTypeCounts"], [1, 1, 1, 1])
+            self.assertFalse(metadata["hasQefRank"])
+            self.assertEqual(metadata["qefRankCounts"], [0, 0, 0, 0])
             np.testing.assert_array_equal(
                 np.load(root / "cache" / "ovoxel_type.npy", allow_pickle=False),
+                expected,
+            )
+            np.testing.assert_array_equal(
+                np.load(root / "cache" / "qef_rank.npy", allow_pickle=False),
+                np.full(4, decode_vxz.MISSING_QEF_RANK, dtype=np.uint8),
+            )
+
+    def test_worker_cache_reports_qef_rank_counts(self):
+        expected = np.array([0, 1, 2, 3], dtype=np.uint8)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "with-qef-rank.vxz"
+            self.write_vxz(source, None, expected)
+            metadata = vxz_worker.prepare_cache(source, root / "cache")
+            self.assertTrue(metadata["hasQefRank"])
+            self.assertEqual(metadata["qefRankCounts"], [1, 1, 1, 1])
+            np.testing.assert_array_equal(
+                np.load(root / "cache" / "qef_rank.npy", allow_pickle=False),
                 expected,
             )
 

@@ -94,11 +94,17 @@ normalization reference. Without a VXZ, the existing mesh bounds are used.
 
 The Options panel can independently hide the mesh, voxels, or projected dual
 vertices, change point size, and color voxels by occupancy, signed intersections,
-dual offset, or the optional `ovoxel_type` fallback case. Dual vertices are shown
+dual offset, the optional `ovoxel_type` fallback case, or the optional `qef_rank`.
+Dual vertices are shown
 both on the native-resolution 2D slice and on its matching 3D slice plane.
 Fallback colors distinguish the 3D
 interior solution (0), 2D face solution (1), 1D edge solution (2), and corner
 solution (3); the option is disabled for older VXZ files without that field.
+QEF rank colors distinguish deficient ranks 0/1/2 from full rank 3. The stored
+rank is defined by the producer before adding the QEF regularization term, with
+a relative threshold of `1e-5`; the viewer consumes that value directly and does
+not recompute rank from the regularized system. This option is likewise disabled
+for older VXZ files without `qef_rank`.
 The exact decoded mesh remains available through `decode_vxz.py`. The interactive
 viewer uses a vertex-clustered, connected viewport LOD from that decoded topology
 so the supplied 42.9-million-triangle sample does not allocate the full mesh in
@@ -112,7 +118,7 @@ VXZ slices are cell-centered. For resolution `R`, slice index `k` is placed at
 with nearest-neighbor rendering and no mipmaps: one CSS/image pixel is exactly
 one O-Voxel grid cell. Pointer inspection reports that pixel's exact integer
 grid coordinate, world-space cell center, dual vertex, signed-edge bits, and
-fallback case when available.
+fallback case and QEF rank/deficiency when available.
 
 Decoded previews and exact sparse attributes are cached by VXZ SHA-256 under
 `~/Library/Caches/voxel-mesh-viewer/vxz`, so opening the same file again avoids

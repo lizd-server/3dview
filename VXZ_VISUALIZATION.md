@@ -103,7 +103,7 @@ Rendering requirements:
 - pointer inspection applies the table above directly and reports the exact
   `(x, y, z)` cell coordinate and its raw VXZ attributes.
 
-This convention is shared by occupancy, `dual_vertices`, `ovoxel_type`, signed-edge color,
+This convention is shared by occupancy, `dual_vertices`, `ovoxel_type`, `qef_rank`, signed-edge color,
 mesh cross-section overlays, the 2D slice, and the textured 3D slice plane.
 There must be no per-layer offset of half a voxel.
 
@@ -112,7 +112,7 @@ There must be no per-layer offset of half a voxel.
 The local worker reuses the CPU reconstruction in `decode_vxz.py`:
 
 1. Decode each VXZ SVO chunk and its `dual_vertices` / `intersected` streams,
-   plus the optional one-channel `ovoxel_type` stream.
+   plus the optional one-channel `ovoxel_type` and `qef_rank` streams.
 2. Build the coordinate index and connect the four dual vertices around every
    signed x/y/z edge.
 3. Keep the current exact binary PLY output as the export/debug artifact.
@@ -149,7 +149,7 @@ three modes backed by the original sparse voxels:
   slice canvas plus the 3D slice plane. This is the most precise way to inspect
   occupancy at resolution 1536.
 
-Keep `dual_vertices`, `intersected`, and `ovoxel_type` in the voxel payload so
+Keep `dual_vertices`, `intersected`, `ovoxel_type`, and `qef_rank` in the voxel payload so
 the UI can color by useful O-Voxel diagnostics:
 
 - active occupancy;
@@ -157,16 +157,23 @@ the UI can color by useful O-Voxel diagnostics:
 - positive/negative intersection sign;
 - dual-vertex local offset;
 - fallback case: interior/face/edge/corner for values 0/1/2/3;
+- QEF rank: deficient for values 0/1/2, full rank for value 3;
 - VXZ chunk id.
 
-A compact full-resolution voxel record is 11 bytes:
+A compact full-resolution voxel record is 12 bytes:
 
 ```text
 uint16 coord_x, coord_y, coord_z
 uint8 dual_x, dual_y, dual_z
 uint8 intersected
 uint8 ovoxel_type  # 255 when absent in an older VXZ
+uint8 qef_rank     # 0..3, or 255 when absent in an older VXZ
 ```
+
+`qef_rank` is produced from the QEF before its regularization term is added,
+using a relative threshold of `1e-5`. The viewer displays this stored diagnostic
+and must not recompute rank from the regularized matrix, whose identity term
+would conceal the original rank deficiency.
 
 LOD files contain the same record for one representative per coarser SVO cell,
 so switching levels does not require changing shaders.

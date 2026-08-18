@@ -23,6 +23,23 @@ import { parseNpy } from "./volumeLoader";
 type MeshMode = "solid" | "wireframe" | "transparent" | "solidWire";
 type SliceRenderMode = "pixels" | "cornerDots";
 
+interface ElectronVxzOpenRequest {
+  requestId: string;
+  sourceName: string;
+}
+
+declare global {
+  interface Window {
+    voxelMeshViewer?: {
+      onOpenVxzRequest(callback: (payload: ElectronVxzOpenRequest) => void): void;
+      openVxzFile(requestId: string, resolution: number | null): Promise<VxzJobResponse>;
+      getVxzResolution(): Promise<number | null>;
+      setVxzResolution(resolution: number | null): Promise<void>;
+      readyForOpenFiles(): void;
+    };
+  }
+}
+
 const DOT_SPACING = 4;
 const DOT_RADIUS = 1.5;
 const DOT_MARGIN = 3;
@@ -301,6 +318,7 @@ class MeshSliceViewer {
     this.resetCamera();
     this.configureRenderer();
     this.bindEvents();
+    void this.initializeElectronFileBridge();
     void this.initializeRemoteBrowser();
     this.updateSliceControls(true);
     this.updateSlicePlane();
@@ -388,6 +406,16 @@ class MeshSliceViewer {
     this.folderInput.addEventListener("change", () => void this.loadSelectedPipelineFolder());
     this.meshInput.addEventListener("change", () => void this.loadSelectedMeshFile());
     this.vxzInput.addEventListener("change", () => void this.loadSelectedVxz());
+    window.voxelMeshViewer?.onOpenVxzRequest((request) => {
+      void this.openAssociatedVxz(request).catch((error) => {
+        if (!isAbortError(error)) {
+          this.setStatus(errorMessage(error));
+        }
+      });
+    });
+    this.vxzResolution.addEventListener("change", () => {
+      void this.persistVxzResolution().catch((error) => this.setStatus(errorMessage(error)));
+    });
     this.remotePanel?.addEventListener("toggle", () => this.updateRemoteBrowserPosition());
     getElement<HTMLButtonElement>("remoteGoButton").addEventListener("click", () => {
       void this.loadRemotePath(this.remotePathInput.value.trim());
@@ -1111,6 +1139,70 @@ class MeshSliceViewer {
 
   private async loadVxz(file: File): Promise<void> {
     const requestedResolution = this.requestedVxzResolution();
+    await this.loadVxzSource(file.name, `Uploading VXZ ${file.name}`, async (signal) => {
+      const openResponse = await fetch(
+        `${VXZ_API_BASE}/open?name=${encodeURIComponent(file.name)}`
+        + (requestedResolution === null ? "" : `&resolution=${requestedResolution}`),
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/octet-stream" },
+          body: file,
+          signal,
+        },
+      );
+      if (!openResponse.ok) {
+        throw new Error(await responseError(openResponse));
+      }
+      return await openResponse.json() as VxzJobResponse;
+    });
+  }
+
+  private async loadOpenedVxz(sourceName: string, job: VxzJobResponse): Promise<void> {
+    await this.loadVxzSource(sourceName, `Opening VXZ ${sourceName}`, async () => job);
+  }
+
+  private async openAssociatedVxz(request: ElectronVxzOpenRequest): Promise<void> {
+    const bridge = window.voxelMeshViewer;
+    if (!bridge) {
+      throw new Error("Electron VXZ bridge is unavailable");
+    }
+    const resolution = this.requestedVxzResolution();
+    await this.persistVxzResolution();
+    this.setStatus(`Opening VXZ ${request.sourceName}`);
+    const job = await bridge.openVxzFile(request.requestId, resolution);
+    await this.loadOpenedVxz(request.sourceName, job);
+  }
+
+  private async initializeElectronFileBridge(): Promise<void> {
+    const bridge = window.voxelMeshViewer;
+    if (!bridge) {
+      return;
+    }
+    try {
+      const resolution = await bridge.getVxzResolution();
+      if (resolution !== null) {
+        this.vxzResolution.value = String(resolution);
+      }
+    } catch (error) {
+      this.setStatus(`Could not restore VXZ resolution: ${errorMessage(error)}`);
+    } finally {
+      bridge.readyForOpenFiles();
+    }
+  }
+
+  private async persistVxzResolution(): Promise<void> {
+    const bridge = window.voxelMeshViewer;
+    if (!bridge) {
+      return;
+    }
+    await bridge.setVxzResolution(this.requestedVxzResolution());
+  }
+
+  private async loadVxzSource(
+    sourceName: string,
+    initialMessage: string,
+    openJob: (signal: AbortSignal) => Promise<VxzJobResponse>,
+  ): Promise<void> {
     this.clearVxzSource();
     this.activeVolume = null;
     this.volumeLoadToken += 1;
@@ -1120,24 +1212,11 @@ class MeshSliceViewer {
     const token = ++this.vxzLoadToken;
     const controller = new AbortController();
     this.vxzLoadAbort = controller;
-    let loadTaskId: number | null = this.beginFileLoad(`Uploading VXZ ${file.name}`);
-    this.setStatus(`Uploading VXZ ${file.name}`);
+    let loadTaskId: number | null = this.beginFileLoad(initialMessage);
+    this.setStatus(initialMessage);
 
     try {
-      const openResponse = await fetch(
-        `${VXZ_API_BASE}/open?name=${encodeURIComponent(file.name)}`
-        + (requestedResolution === null ? "" : `&resolution=${requestedResolution}`),
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/octet-stream" },
-          body: file,
-          signal: controller.signal,
-        },
-      );
-      if (!openResponse.ok) {
-        throw new Error(await responseError(openResponse));
-      }
-      let job = await openResponse.json() as VxzJobResponse;
+      let job = await openJob(controller.signal);
       this.assertVxzJob(job);
 
       while (job.status === "processing") {
@@ -1214,17 +1293,17 @@ class MeshSliceViewer {
       if (token !== this.vxzLoadToken) {
         throw new DOMException("Superseded VXZ load", "AbortError");
       }
-      this.loadVxzMeshPreview(meshBuffer, file.name);
+      this.loadVxzMeshPreview(meshBuffer, sourceName);
       this.updateVxzPointSize();
       this.updateMeshDisplay();
 
       if (loadTaskId !== null) {
-        this.finishLoadProgress(loadTaskId, `Loaded VXZ ${file.name}`);
+        this.finishLoadProgress(loadTaskId, `Loaded VXZ ${sourceName}`);
         loadTaskId = null;
       }
       const metadata = this.vxzMetadata;
       this.setStatus(
-        `Loaded ${file.name}: r=${metadata.resolution}, ${metadata.voxelCount.toLocaleString()} voxels, `
+        `Loaded ${sourceName}: r=${metadata.resolution}, ${metadata.voxelCount.toLocaleString()} voxels, `
         + `${metadata.faceCount.toLocaleString()} exact faces; preview ${metadata.previewFaceCount.toLocaleString()} faces`,
       );
     } catch (error) {

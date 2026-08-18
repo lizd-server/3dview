@@ -14,6 +14,7 @@
     "icon:mac": "swift scripts/create-app-icon.swift",
     "build": "tsc --noEmit && vite build",
     "mac:app": "node scripts/create-mac-app.mjs",
+    "mac:register-vxz": "node scripts/register-vxz-default.mjs",
     "preview": "vite preview --host 127.0.0.1"
   },
   "dependencies": {

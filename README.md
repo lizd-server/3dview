@@ -113,6 +113,14 @@ npm run mac:app
 
 This writes `dist-mac/Voxel Mesh Viewer-darwin-<arch>/Voxel Mesh Viewer.app` and installs a copy to `~/Applications/Voxel Mesh Viewer.app`. The app bundles a relocatable Python 3.11 + NumPy VXZ runtime, so the installed copy does not depend on the source checkout or `.venv-vxz` after packaging.
 
+Register the installed app as the macOS default for `.vxz` files with:
+
+```bash
+npm run mac:register-vxz
+```
+
+After registration, double-clicking a `.vxz` file launches the viewer and automatically loads that file. Finder opens use the explicit **VXZ resolution** saved in Options; when that field is blank they use Auto, like the in-app file picker. The app stores this preference under its stable macOS Application Support directory, so it survives the app's random internal port changing between launches.
+
 Double-clicking the app opens a native macOS application window, not an external browser. The packaged app serves the built frontend and the read-only remote-file API inside the Electron main process on an app-owned loopback port, so PM2, Vite, and fixed ports such as `5173`/`5175` are not required for normal app use.
 
 ## Input Folder

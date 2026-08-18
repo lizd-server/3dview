@@ -1,5 +1,6 @@
-const { app, BrowserWindow, dialog, nativeImage, shell } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain, nativeImage, shell } = require("electron");
 const { spawn } = require("node:child_process");
+const crypto = require("node:crypto");
 const fs = require("node:fs");
 const http = require("node:http");
 const path = require("node:path");
@@ -11,14 +12,59 @@ const REMOTE_HOST_PATTERN = /^(?!-)[A-Za-z0-9_.@-]{1,128}$/;
 
 let mainWindow = null;
 let appServer = null;
+let appServerUrl = null;
 let vxzApi = null;
+let rendererReadyForFiles = false;
+let vxzResolutionPreference = null;
+let vxzPreferenceWrite = Promise.resolve();
+const pendingVxzPaths = [];
+const pendingVxzRequests = new Map();
 
 app.setName("Voxel Mesh Viewer");
+
+app.on("open-file", (event, filePath) => {
+  event.preventDefault();
+  queueVxzPath(filePath);
+});
+
+ipcMain.on("vxz:renderer-ready", (event) => {
+  if (mainWindow && event.sender === mainWindow.webContents) {
+    rendererReadyForFiles = true;
+    void flushPendingVxzPaths();
+  }
+});
+
+ipcMain.handle("vxz:open-file-open", async (event, payload) => {
+  assertViewerSender(event.sender);
+  const requestId = String(payload?.requestId ?? "");
+  const filePath = pendingVxzRequests.get(requestId);
+  if (!filePath) {
+    throw new Error("VXZ open request is unknown or has already been used");
+  }
+  const resolution = payload?.resolution;
+  validateVxzResolution(resolution);
+  pendingVxzRequests.delete(requestId);
+  return uploadLocalVxz(filePath, resolution);
+});
+
+ipcMain.handle("vxz:get-resolution", (event) => {
+  assertViewerSender(event.sender);
+  return vxzResolutionPreference;
+});
+
+ipcMain.handle("vxz:set-resolution", async (event, resolution) => {
+  assertViewerSender(event.sender);
+  validateVxzResolution(resolution);
+  vxzResolutionPreference = resolution;
+  await saveVxzPreferences();
+});
 
 app.whenReady().then(async () => {
   try {
     setRuntimeAppIcon();
+    await loadVxzPreferences();
     const url = await startAppServer();
+    appServerUrl = url;
     createWindow(url);
   } catch (error) {
     await showStartupError(error);
@@ -29,7 +75,10 @@ app.whenReady().then(async () => {
 app.on("activate", () => {
   if (BrowserWindow.getAllWindows().length === 0) {
     void startAppServer()
-      .then((url) => createWindow(url))
+      .then((url) => {
+        appServerUrl = url;
+        createWindow(url);
+      })
       .catch((error) => showStartupError(error));
   }
 });
@@ -96,6 +145,7 @@ async function startAppServer() {
 
 function createWindow(url) {
   const icon = loadRuntimeAppIcon();
+  rendererReadyForFiles = false;
   mainWindow = new BrowserWindow({
     width: 1360,
     height: 800,
@@ -111,7 +161,17 @@ function createWindow(url) {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      preload: path.join(app.getAppPath(), "electron", "preload.cjs"),
     },
+  });
+
+  mainWindow.on("closed", () => {
+    for (const filePath of pendingVxzRequests.values()) {
+      pendingVxzPaths.unshift(filePath);
+    }
+    pendingVxzRequests.clear();
+    mainWindow = null;
+    rendererReadyForFiles = false;
   });
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
@@ -127,6 +187,166 @@ function createWindow(url) {
   appUrl.searchParams.set("electron", "1");
   appUrl.searchParams.set("apiBase", "/api/remote");
   mainWindow.loadURL(appUrl.toString());
+}
+
+function queueVxzPath(filePath) {
+  if (path.extname(filePath).toLowerCase() !== ".vxz") {
+    return;
+  }
+  pendingVxzPaths.push(path.resolve(filePath));
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.show();
+    mainWindow.focus();
+  }
+  if (app.isReady()) {
+    void flushPendingVxzPaths();
+  }
+}
+
+async function flushPendingVxzPaths() {
+  if (
+    !rendererReadyForFiles
+    || !appServerUrl
+    || !mainWindow
+    || mainWindow.isDestroyed()
+  ) {
+    return;
+  }
+
+  while (pendingVxzPaths.length > 0) {
+    const filePath = pendingVxzPaths.shift();
+    const requestId = crypto.randomUUID();
+    pendingVxzRequests.set(requestId, filePath);
+    mainWindow.webContents.send("vxz:open-file-request", {
+      requestId,
+      sourceName: path.basename(filePath),
+    });
+  }
+}
+
+async function uploadLocalVxz(filePath, resolution) {
+  const stat = await fs.promises.stat(filePath);
+  if (!stat.isFile() || stat.size <= 0 || stat.size > 2 * 1024 * 1024 * 1024) {
+    throw new Error("VXZ file must be a regular file no larger than 2 GiB");
+  }
+
+  const uploadUrl = new URL("/api/vxz/open", appServerUrl);
+  uploadUrl.searchParams.set("name", path.basename(filePath));
+  if (resolution !== null) {
+    uploadUrl.searchParams.set("resolution", String(resolution));
+  }
+  return new Promise((resolve, reject) => {
+    const request = http.request(uploadUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/octet-stream",
+        "Content-Length": stat.size,
+      },
+    });
+    const source = fs.createReadStream(filePath);
+    const chunks = [];
+    let responseBytes = 0;
+    let settled = false;
+
+    const fail = (error) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      source.destroy();
+      reject(error instanceof Error ? error : new Error(String(error)));
+    };
+
+    request.on("response", (response) => {
+      response.on("data", (chunk) => {
+        responseBytes += chunk.length;
+        if (responseBytes > 1_000_000) {
+          fail(new Error("VXZ backend response is too large"));
+          request.destroy();
+          return;
+        }
+        chunks.push(chunk);
+      });
+      response.on("end", () => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        const text = Buffer.concat(chunks).toString("utf8");
+        if (!response.statusCode || response.statusCode < 200 || response.statusCode >= 300) {
+          reject(new Error(text || `VXZ backend returned HTTP ${response.statusCode}`));
+          return;
+        }
+        try {
+          resolve(JSON.parse(text));
+        } catch (error) {
+          reject(new Error(`Could not parse VXZ backend response: ${errorMessage(error)}`));
+        }
+      });
+      response.on("aborted", () => fail(new Error("VXZ backend response was aborted")));
+      response.on("error", fail);
+      response.on("close", () => {
+        if (!response.complete) {
+          fail(new Error("VXZ backend response closed before it completed"));
+        }
+      });
+    });
+    request.on("error", fail);
+    source.on("error", (error) => {
+      fail(error);
+      request.destroy();
+    });
+    source.pipe(request);
+  });
+}
+
+function assertViewerSender(sender) {
+  if (!mainWindow || sender !== mainWindow.webContents) {
+    throw new Error("VXZ request did not come from the viewer window");
+  }
+}
+
+function validateVxzResolution(resolution) {
+  if (resolution !== null && (!Number.isInteger(resolution) || resolution <= 0)) {
+    throw new Error("VXZ resolution must be a positive integer or Auto");
+  }
+}
+
+async function loadVxzPreferences() {
+  try {
+    const text = await fs.promises.readFile(vxzPreferencesPath(), "utf8");
+    const parsed = JSON.parse(text);
+    validateVxzResolution(parsed.resolution);
+    vxzResolutionPreference = parsed.resolution;
+  } catch (error) {
+    if (error?.code !== "ENOENT") {
+      console.warn(`Could not load VXZ preferences: ${errorMessage(error)}`);
+    }
+    vxzResolutionPreference = null;
+  }
+}
+
+function saveVxzPreferences() {
+  vxzPreferenceWrite = vxzPreferenceWrite.catch(() => undefined).then(async () => {
+    const target = vxzPreferencesPath();
+    const staged = `${target}.${crypto.randomUUID()}.tmp`;
+    await fs.promises.mkdir(path.dirname(target), { recursive: true });
+    try {
+      await fs.promises.writeFile(
+        staged,
+        `${JSON.stringify({ resolution: vxzResolutionPreference }, null, 2)}\n`,
+        "utf8",
+      );
+      await fs.promises.rename(staged, target);
+    } finally {
+      await fs.promises.rm(staged, { force: true });
+    }
+  });
+  return vxzPreferenceWrite;
+}
+
+function vxzPreferencesPath() {
+  return path.join(app.getPath("userData"), "vxz-preferences.json");
 }
 
 function findRuntimeAppIcon() {

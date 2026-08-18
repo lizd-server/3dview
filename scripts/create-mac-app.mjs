@@ -117,7 +117,7 @@ function run(command, args, options = {}) {
   const result = spawnSync(command, args, {
     cwd: projectDir,
     env: options.env ?? process.env,
-    stdio: "inherit",
+    stdio: options.quiet ? "ignore" : "inherit",
   });
 
   if (result.status !== 0 && !options.allowFailure) {
@@ -131,4 +131,32 @@ function applyBundleIcon(bundleDir) {
   run("cp", [iconPath, path.join(resourcesDir, "app-icon.icns")]);
   run("cp", [dockIconPath, path.join(resourcesDir, "app-icon.png")]);
   run("/usr/libexec/PlistBuddy", ["-c", "Set :CFBundleIconFile app-icon.icns", plistPath]);
+  configureVxzDocumentType(plistPath);
+}
+
+function configureVxzDocumentType(plistPath) {
+  const plistBuddy = "/usr/libexec/PlistBuddy";
+  run(plistBuddy, ["-c", "Delete :CFBundleDocumentTypes", plistPath], { allowFailure: true, quiet: true });
+  run(plistBuddy, ["-c", "Add :CFBundleDocumentTypes array", plistPath]);
+  run(plistBuddy, ["-c", "Add :CFBundleDocumentTypes:0 dict", plistPath]);
+  run(plistBuddy, ["-c", "Add :CFBundleDocumentTypes:0:CFBundleTypeName string O-Voxel VXZ", plistPath]);
+  run(plistBuddy, ["-c", "Add :CFBundleDocumentTypes:0:CFBundleTypeRole string Viewer", plistPath]);
+  run(plistBuddy, ["-c", "Add :CFBundleDocumentTypes:0:LSHandlerRank string Owner", plistPath]);
+  run(plistBuddy, ["-c", "Add :CFBundleDocumentTypes:0:CFBundleTypeIconFile string app-icon.icns", plistPath]);
+  run(plistBuddy, ["-c", "Add :CFBundleDocumentTypes:0:CFBundleTypeExtensions array", plistPath]);
+  run(plistBuddy, ["-c", "Add :CFBundleDocumentTypes:0:CFBundleTypeExtensions:0 string vxz", plistPath]);
+  run(plistBuddy, ["-c", "Add :CFBundleDocumentTypes:0:LSItemContentTypes array", plistPath]);
+  run(plistBuddy, ["-c", "Add :CFBundleDocumentTypes:0:LSItemContentTypes:0 string com.lizd.ovoxel-vxz", plistPath]);
+
+  run(plistBuddy, ["-c", "Delete :UTExportedTypeDeclarations", plistPath], { allowFailure: true, quiet: true });
+  run(plistBuddy, ["-c", "Add :UTExportedTypeDeclarations array", plistPath]);
+  run(plistBuddy, ["-c", "Add :UTExportedTypeDeclarations:0 dict", plistPath]);
+  run(plistBuddy, ["-c", "Add :UTExportedTypeDeclarations:0:UTTypeIdentifier string com.lizd.ovoxel-vxz", plistPath]);
+  run(plistBuddy, ["-c", "Add :UTExportedTypeDeclarations:0:UTTypeDescription string O-Voxel VXZ", plistPath]);
+  run(plistBuddy, ["-c", "Add :UTExportedTypeDeclarations:0:UTTypeConformsTo array", plistPath]);
+  run(plistBuddy, ["-c", "Add :UTExportedTypeDeclarations:0:UTTypeConformsTo:0 string public.data", plistPath]);
+  run(plistBuddy, ["-c", "Add :UTExportedTypeDeclarations:0:UTTypeTagSpecification dict", plistPath]);
+  run(plistBuddy, ["-c", "Add :UTExportedTypeDeclarations:0:UTTypeTagSpecification:public.filename-extension array", plistPath]);
+  run(plistBuddy, ["-c", "Add :UTExportedTypeDeclarations:0:UTTypeTagSpecification:public.filename-extension:0 string vxz", plistPath]);
+  run(plistBuddy, ["-c", "Add :UTExportedTypeDeclarations:0:UTTypeTagSpecification:public.mime-type string application/x-vxz", plistPath]);
 }

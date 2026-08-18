@@ -2,6 +2,17 @@ import * as THREE from "three";
 
 const MIN_NORMALIZABLE_SIZE = 1e-12;
 
+export function normalizeObjectToPreferredBounds(
+  object: THREE.Object3D,
+  preferredBounds: THREE.Box3 | null,
+  fallbackBounds: THREE.Box3 | null,
+): boolean {
+  const targetBounds = preferredBounds && !preferredBounds.isEmpty()
+    ? preferredBounds
+    : fallbackBounds;
+  return targetBounds ? normalizeObjectToBounds(object, targetBounds) : false;
+}
+
 export function normalizeObjectToBounds(
   object: THREE.Object3D,
   targetBounds: THREE.Box3,

@@ -3,7 +3,32 @@ import test from "node:test";
 
 import * as THREE from "three";
 
-import { normalizeObjectToBounds } from "../src/mesh-normalization.ts";
+import {
+  normalizeObjectToBounds,
+  normalizeObjectToPreferredBounds,
+} from "../src/mesh-normalization.ts";
+
+test("prefers VXZ bounds when an earlier unnormalized mesh enlarged the current bounds", () => {
+  const importedMesh = new THREE.Mesh(new THREE.BoxGeometry(1.053951, 0.886719, 2));
+  const vxzBounds = new THREE.Box3(
+    new THREE.Vector3(-0.263496, -0.221684, -0.5),
+    new THREE.Vector3(0.263488, 0.221760, 0.5),
+  );
+  const contaminatedCurrentBounds = new THREE.Box3(
+    new THREE.Vector3(-0.526976, -0.443359, -1),
+    new THREE.Vector3(0.526976, 0.443359, 1),
+  );
+
+  const normalized = normalizeObjectToPreferredBounds(
+    importedMesh,
+    vxzBounds,
+    contaminatedCurrentBounds,
+  );
+
+  assert.equal(normalized, true);
+  const resultSize = new THREE.Box3().setFromObject(importedMesh).getSize(new THREE.Vector3());
+  assert.ok(resultSize.distanceTo(new THREE.Vector3(0.5269755, 0.4433595, 1)) < 1e-4);
+});
 
 test("normalizes a mesh uniformly to the current bounds size and center", () => {
   const object = new THREE.Mesh(new THREE.BoxGeometry(4, 2, 8));

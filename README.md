@@ -87,6 +87,11 @@ coordinates:
   LOD targets about 5,000,000 triangles;
 - an exact on-demand `R x R` X/Y/Z slice queried from every sparse VXZ record.
 
+When **Normalize imports to current size** is enabled while a VXZ is open,
+new PLY/OBJ/STL meshes are uniformly scaled and centered to that VXZ's exact
+decoded bounds. Previously imported comparison meshes do not enlarge the
+normalization reference. Without a VXZ, the existing mesh bounds are used.
+
 The Options panel can independently hide the mesh, voxels, or projected dual
 vertices, change point size, and color voxels by occupancy, signed intersections,
 dual offset, or the optional `ovoxel_type` fallback case. Dual vertices are shown

@@ -18,7 +18,7 @@ import {
   type VxzJobResponse,
   type VxzMetadata,
 } from "./types";
-import { normalizeObjectToBounds } from "./mesh-normalization";
+import { normalizeObjectToPreferredBounds } from "./mesh-normalization";
 import { parseNpy } from "./volumeLoader";
 import {
   projectVxzDualVertexToSlice,
@@ -1655,9 +1655,13 @@ class MeshSliceViewer {
   ): Promise<void> {
     const filesToLoad = [...files];
     const visibility = options.visibility ?? [];
-    const normalizationBounds = options.normalizeToCurrentSize
+    const preferredNormalizationBounds = options.normalizeToCurrentSize
+      ? this.vxzMeshBounds()
+      : null;
+    const fallbackNormalizationBounds = options.normalizeToCurrentSize
       ? this.currentMeshBounds()
       : null;
+    const normalizationTargetLabel = preferredNormalizationBounds ? "VXZ size" : "current size";
     let normalizedCount = 0;
 
     if (options.replace) {
@@ -1692,7 +1696,11 @@ class MeshSliceViewer {
           this.removeLoadProgress(loadTaskId);
         }
       }
-      if (normalizationBounds && normalizeObjectToBounds(object, normalizationBounds)) {
+      if (normalizeObjectToPreferredBounds(
+        object,
+        preferredNormalizationBounds,
+        fallbackNormalizationBounds,
+      )) {
         normalizedCount += 1;
       }
       this.currentMeshFiles.push(file);
@@ -1712,11 +1720,11 @@ class MeshSliceViewer {
     const clippingNote = this.activeVolume ? "; clipped by current slice" : "";
     const normalizationNote = options.normalizeToCurrentSize
       ? normalizedCount === loadedCount
-        ? "; normalized to current size"
+        ? `; normalized to ${normalizationTargetLabel}`
         : normalizedCount > 0
-          ? `; ${normalizedCount}/${loadedCount} normalized to current size`
-          : normalizationBounds
-            ? "; normalization skipped, invalid mesh or current bounds"
+          ? `; ${normalizedCount}/${loadedCount} normalized to ${normalizationTargetLabel}`
+          : preferredNormalizationBounds || fallbackNormalizationBounds
+            ? `; normalization skipped, invalid mesh or ${normalizationTargetLabel} bounds`
             : "; current size unavailable, kept source size"
       : "";
     this.setStatus(
@@ -1729,6 +1737,18 @@ class MeshSliceViewer {
   private currentMeshBounds(): THREE.Box3 | null {
     this.meshRoot.updateWorldMatrix(true, true);
     const bounds = new THREE.Box3().setFromObject(this.meshRoot);
+    return bounds.isEmpty() ? null : bounds;
+  }
+
+  private vxzMeshBounds(): THREE.Box3 | null {
+    const metadata = this.vxzMetadata;
+    if (!metadata) {
+      return null;
+    }
+    const bounds = new THREE.Box3(
+      new THREE.Vector3(...metadata.boundsMin),
+      new THREE.Vector3(...metadata.boundsMax),
+    );
     return bounds.isEmpty() ? null : bounds;
   }
 

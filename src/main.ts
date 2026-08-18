@@ -1414,6 +1414,7 @@ class MeshSliceViewer {
     geometry.computeBoundingSphere();
     const mesh = new THREE.Mesh(geometry);
     mesh.userData.preferLightweightWireframe = true;
+    mesh.userData.preferFlatShading = true;
     const meshName = `${sourceName} decoded mesh (viewport LOD)`;
     const root = this.addMeshObject(mesh, meshName, this.vxzMeshVisible.checked);
     this.vxzMeshObject = root;
@@ -1665,16 +1666,18 @@ class MeshSliceViewer {
     });
 
     for (const child of solidMeshes) {
+      const useFlatShading = child.userData.preferFlatShading === true;
 
-      if (!child.geometry.attributes.normal) {
+      if (!useFlatShading && !child.geometry.attributes.normal) {
         child.geometry.computeVertexNormals();
       }
 
       child.userData.viewerRole = "solid";
       child.material = new THREE.MeshStandardMaterial({
-        color: "#d9dde7",
-        roughness: 0.65,
-        metalness: 0.04,
+        color: useFlatShading ? "#94a3b8" : "#d9dde7",
+        roughness: useFlatShading ? 0.82 : 0.65,
+        metalness: useFlatShading ? 0 : 0.04,
+        flatShading: useFlatShading,
         transparent: true,
         opacity: Number(this.meshOpacity.value),
         side: THREE.DoubleSide,

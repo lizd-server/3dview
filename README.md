@@ -94,6 +94,8 @@ viewer uses a vertex-clustered, connected viewport LOD from that decoded topolog
 so the supplied 42.9-million-triangle sample does not allocate the full mesh in
 browser memory. This LOD is a regular mesh object (not a point or placeholder
 preview), and it can be shown together with the exact grid-aligned voxel slice.
+Decoded VXZ meshes use flat face shading by default so voxel-scale steps and hard
+edges remain as legible as they are in MeshLab.
 
 VXZ slices are cell-centered. For resolution `R`, slice index `k` is placed at
 `-0.5 + (k + 0.5) / R`. The right pane is a native `R x R` scrollable canvas

@@ -57,7 +57,7 @@ export interface VolumeLabelMetadata {
 
 export interface VxzMetadata {
   formatVersion: number;
-  cacheVersion?: number;
+  cacheVersion: number;
   sourceName: string;
   resolution: number;
   resolutionSource?: "inferred" | "explicit";

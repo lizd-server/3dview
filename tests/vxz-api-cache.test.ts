@@ -59,3 +59,58 @@ test("all read routes reject an old on-disk VXZ cache after restart", async () =
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("does not spawn a slice worker when the client aborts during cache restore", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "vxz-cancelled-slice-"));
+  const id = "b".repeat(64);
+  let releaseCache = (_metadata: object) => {};
+  let markCacheStarted = () => {};
+  const cacheStarted = new Promise<void>((resolve) => {
+    markCacheStarted = resolve;
+  });
+  const cacheResult = new Promise<object>((resolve) => {
+    releaseCache = resolve;
+  });
+  let spawnCount = 0;
+  const api = createVxzApi({
+    cacheRoot: root,
+    projectRoot: path.resolve("."),
+    cacheReader: async () => {
+      markCacheStarted();
+      return cacheResult;
+    },
+    spawn: () => {
+      spawnCount += 1;
+      throw new Error("cancelled slice must not spawn");
+    },
+  });
+  const server = createServer((request, response) => {
+    api.handle(request, response, new URL(request.url ?? "/", "http://127.0.0.1"));
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const controller = new AbortController();
+  const request = fetch(
+    `http://127.0.0.1:${address.port}/api/vxz/slice?id=${id}&axis=z&index=0`,
+    { signal: controller.signal },
+  ).catch((error) => error);
+
+  try {
+    const restoreStarted = await Promise.race([
+      cacheStarted.then(() => true),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 100)),
+    ]);
+    assert.equal(restoreStarted, true, "slice route did not use the injected cache reader");
+    controller.abort();
+    await request;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    releaseCache({ formatVersion: 3, cacheVersion: 5, resolution: 8 });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(spawnCount, 0);
+  } finally {
+    api.dispose();
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    await rm(root, { recursive: true, force: true });
+  }
+});

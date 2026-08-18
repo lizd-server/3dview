@@ -20,6 +20,8 @@ function createVxzApi(options = {}) {
     "vxz",
   ));
   const python = resolvePython(projectRoot, options.python);
+  const spawnWorker = options.spawn ?? spawn;
+  const cacheReader = options.cacheReader ?? readCompleteCache;
   const workerEnv = resolveWorkerEnvironment(projectRoot);
   const requestedPrepareWorkers = Number(options.maxPrepareWorkers ?? 1);
   const maxPrepareWorkers = Number.isInteger(requestedPrepareWorkers) && requestedPrepareWorkers > 0
@@ -146,7 +148,7 @@ function createVxzApi(options = {}) {
       const metadataPath = path.join(jobDir, "metadata.json");
       await fsp.mkdir(jobDir, { recursive: true });
 
-      const metadata = await readCompleteCache(jobDir);
+      const metadata = await cacheReader(jobDir);
       if (metadata) {
         await fsp.rm(staged, { force: true });
         const job = readyJob(id, sourceName, jobDir, sourcePath, metadata);
@@ -226,7 +228,7 @@ function createVxzApi(options = {}) {
     if (job.resolution !== null) {
       args.push("--resolution", String(job.resolution));
     }
-    const child = spawn(python, args, {
+    const child = spawnWorker(python, args, {
       cwd: projectRoot,
       env: workerEnv,
       stdio: ["ignore", "pipe", "pipe"],
@@ -284,7 +286,7 @@ function createVxzApi(options = {}) {
         return;
       }
       try {
-        job.metadata = await readCompleteCache(job.jobDir);
+        job.metadata = await cacheReader(job.jobDir);
         if (!job.metadata) {
           throw new Error("VXZ worker did not produce a complete current-format cache");
         }
@@ -352,7 +354,22 @@ function createVxzApi(options = {}) {
       sendText(response, 400, "Invalid VXZ slice request");
       return;
     }
+    let child = null;
+    let cancelled = request.aborted || response.destroyed;
+    const cancelSlice = () => {
+      cancelled = true;
+      child?.kill("SIGTERM");
+    };
+    request.on("aborted", cancelSlice);
+    response.on("close", () => {
+      if (!response.writableEnded) {
+        cancelSlice();
+      }
+    });
     const job = await resolveJob(id);
+    if (cancelled || request.aborted || response.destroyed) {
+      return;
+    }
     if (!job) {
       sendText(response, 404, "Unknown VXZ job");
       return;
@@ -364,7 +381,7 @@ function createVxzApi(options = {}) {
     const jobDir = job.jobDir;
 
     activeSliceWorkers.get(id)?.kill("SIGTERM");
-    const child = spawn(python, [workerScript, "slice", jobDir, axis, String(index)], {
+    child = spawnWorker(python, [workerScript, "slice", jobDir, axis, String(index)], {
       cwd: projectRoot,
       env: workerEnv,
       stdio: ["ignore", "pipe", "pipe"],
@@ -409,12 +426,6 @@ function createVxzApi(options = {}) {
         sendText(response, 500, lastUsefulLine(stderr) || `VXZ slice worker exited with code ${code}`);
       }
     });
-    request.on("aborted", () => child.kill("SIGTERM"));
-    response.on("close", () => {
-      if (!response.writableEnded) {
-        child.kill("SIGTERM");
-      }
-    });
   }
 
   async function resolveJob(id) {
@@ -423,7 +434,7 @@ function createVxzApi(options = {}) {
       return existing;
     }
     const jobDir = path.join(cacheRoot, id);
-    const metadata = await readCompleteCache(jobDir);
+    const metadata = await cacheReader(jobDir);
     if (!metadata) {
       return null;
     }

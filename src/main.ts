@@ -1324,7 +1324,13 @@ class MeshSliceViewer {
         this.setLoadProgress(loadTaskId, "Loading voxel preview", { loaded: 0, total: 2 });
       }
       const voxelResponse = await fetch(
-        vxzDataUrl(VXZ_API_BASE, job.id, "voxels", job.metadata.formatVersion),
+        vxzDataUrl(
+          VXZ_API_BASE,
+          job.id,
+          "voxels",
+          job.metadata.formatVersion,
+          job.metadata.cacheVersion,
+        ),
         { signal: controller.signal },
       );
       if (!voxelResponse.ok) {
@@ -1343,7 +1349,13 @@ class MeshSliceViewer {
         this.setLoadProgress(loadTaskId, "Loading mesh preview", { loaded: 1, total: 2 });
       }
       const meshResponse = await fetch(
-        vxzDataUrl(VXZ_API_BASE, job.id, "mesh", job.metadata.formatVersion),
+        vxzDataUrl(
+          VXZ_API_BASE,
+          job.id,
+          "mesh",
+          job.metadata.formatVersion,
+          job.metadata.cacheVersion,
+        ),
         { signal: controller.signal },
       );
       if (!meshResponse.ok) {

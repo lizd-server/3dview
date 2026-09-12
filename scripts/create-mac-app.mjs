@@ -65,9 +65,9 @@ try {
 }
 
 applyBundleIcon(appDir);
-signBundle(appDir);
+signBundle(appDir, { strict: false });
 await rm(installDir, { recursive: true, force: true });
-run("ditto", [appDir, installDir]);
+run("ditto", ["--norsrc", appDir, installDir]);
 applyBundleIcon(installDir);
 await chmod(path.join(installDir, "Contents", "MacOS", appName), 0o755);
 signBundle(installDir);
@@ -133,16 +133,16 @@ function applyBundleIcon(bundleDir) {
   run("cp", [iconPath, path.join(resourcesDir, "app-icon.icns")]);
   run("cp", [dockIconPath, path.join(resourcesDir, "app-icon.png")]);
   run("/usr/libexec/PlistBuddy", ["-c", "Set :CFBundleIconFile app-icon.icns", plistPath]);
-  configureVxzDocumentType(plistPath);
+  configureDocumentTypes(plistPath);
 }
 
-function signBundle(bundleDir) {
+function signBundle(bundleDir, { strict = true } = {}) {
   run("xattr", ["-cr", bundleDir]);
   run("codesign", ["--force", "--deep", "--sign", "-", "--timestamp=none", bundleDir]);
-  run("codesign", ["--verify", "--deep", "--strict", bundleDir]);
+  run("codesign", ["--verify", "--deep", ...(strict ? ["--strict"] : []), bundleDir]);
 }
 
-function configureVxzDocumentType(plistPath) {
+function configureDocumentTypes(plistPath) {
   const plistBuddy = "/usr/libexec/PlistBuddy";
   run(plistBuddy, ["-c", "Delete :CFBundleDocumentTypes", plistPath], { allowFailure: true, quiet: true });
   run(plistBuddy, ["-c", "Add :CFBundleDocumentTypes array", plistPath]);
@@ -155,6 +155,15 @@ function configureVxzDocumentType(plistPath) {
   run(plistBuddy, ["-c", "Add :CFBundleDocumentTypes:0:CFBundleTypeExtensions:0 string vxz", plistPath]);
   run(plistBuddy, ["-c", "Add :CFBundleDocumentTypes:0:LSItemContentTypes array", plistPath]);
   run(plistBuddy, ["-c", "Add :CFBundleDocumentTypes:0:LSItemContentTypes:0 string com.lizd.ovoxel-vxz", plistPath]);
+  run(plistBuddy, ["-c", "Add :CFBundleDocumentTypes:1 dict", plistPath]);
+  run(plistBuddy, ["-c", "Add :CFBundleDocumentTypes:1:CFBundleTypeName string NumPy Array", plistPath]);
+  run(plistBuddy, ["-c", "Add :CFBundleDocumentTypes:1:CFBundleTypeRole string Viewer", plistPath]);
+  run(plistBuddy, ["-c", "Add :CFBundleDocumentTypes:1:LSHandlerRank string Owner", plistPath]);
+  run(plistBuddy, ["-c", "Add :CFBundleDocumentTypes:1:CFBundleTypeIconFile string app-icon.icns", plistPath]);
+  run(plistBuddy, ["-c", "Add :CFBundleDocumentTypes:1:CFBundleTypeExtensions array", plistPath]);
+  run(plistBuddy, ["-c", "Add :CFBundleDocumentTypes:1:CFBundleTypeExtensions:0 string npy", plistPath]);
+  run(plistBuddy, ["-c", "Add :CFBundleDocumentTypes:1:LSItemContentTypes array", plistPath]);
+  run(plistBuddy, ["-c", "Add :CFBundleDocumentTypes:1:LSItemContentTypes:0 string com.lizd.numpy-array", plistPath]);
 
   run(plistBuddy, ["-c", "Delete :UTExportedTypeDeclarations", plistPath], { allowFailure: true, quiet: true });
   run(plistBuddy, ["-c", "Add :UTExportedTypeDeclarations array", plistPath]);
@@ -167,4 +176,13 @@ function configureVxzDocumentType(plistPath) {
   run(plistBuddy, ["-c", "Add :UTExportedTypeDeclarations:0:UTTypeTagSpecification:public.filename-extension array", plistPath]);
   run(plistBuddy, ["-c", "Add :UTExportedTypeDeclarations:0:UTTypeTagSpecification:public.filename-extension:0 string vxz", plistPath]);
   run(plistBuddy, ["-c", "Add :UTExportedTypeDeclarations:0:UTTypeTagSpecification:public.mime-type string application/x-vxz", plistPath]);
+  run(plistBuddy, ["-c", "Add :UTExportedTypeDeclarations:1 dict", plistPath]);
+  run(plistBuddy, ["-c", "Add :UTExportedTypeDeclarations:1:UTTypeIdentifier string com.lizd.numpy-array", plistPath]);
+  run(plistBuddy, ["-c", "Add :UTExportedTypeDeclarations:1:UTTypeDescription string NumPy Array", plistPath]);
+  run(plistBuddy, ["-c", "Add :UTExportedTypeDeclarations:1:UTTypeConformsTo array", plistPath]);
+  run(plistBuddy, ["-c", "Add :UTExportedTypeDeclarations:1:UTTypeConformsTo:0 string public.data", plistPath]);
+  run(plistBuddy, ["-c", "Add :UTExportedTypeDeclarations:1:UTTypeTagSpecification dict", plistPath]);
+  run(plistBuddy, ["-c", "Add :UTExportedTypeDeclarations:1:UTTypeTagSpecification:public.filename-extension array", plistPath]);
+  run(plistBuddy, ["-c", "Add :UTExportedTypeDeclarations:1:UTTypeTagSpecification:public.filename-extension:0 string npy", plistPath]);
+  run(plistBuddy, ["-c", "Add :UTExportedTypeDeclarations:1:UTTypeTagSpecification:public.mime-type string application/x-npy", plistPath]);
 }

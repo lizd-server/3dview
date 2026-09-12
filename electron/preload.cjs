@@ -4,6 +4,12 @@ contextBridge.exposeInMainWorld("voxelMeshViewer", {
   onOpenVxzRequest(callback) {
     ipcRenderer.on("vxz:open-file-request", (_event, payload) => callback(payload));
   },
+  onOpenFieldRequest(callback) {
+    ipcRenderer.on("field:open-file-request", (_event, payload) => callback(payload));
+  },
+  completeFieldOpen(requestId) {
+    ipcRenderer.send("field:open-file-complete", requestId);
+  },
   openVxzFile(requestId, resolution) {
     return ipcRenderer.invoke("vxz:open-file-open", { requestId, resolution });
   },

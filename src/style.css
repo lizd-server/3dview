@@ -129,6 +129,11 @@ select {
   -webkit-app-region: drag;
 }
 
+.electron-app.windows-app .topbar {
+  padding-left: 12px;
+  -webkit-app-region: no-drag;
+}
+
 .electron-app .toolbar-item,
 .electron-app .file-control input[type="file"],
 .electron-app button,

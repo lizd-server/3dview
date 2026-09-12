@@ -12,13 +12,7 @@ const MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024;
 function createVxzApi(options = {}) {
   const projectRoot = path.resolve(options.projectRoot ?? path.join(__dirname, ".."));
   const workerScript = path.resolve(options.workerScript ?? path.join(projectRoot, "vxz_worker.py"));
-  const cacheRoot = path.resolve(options.cacheRoot ?? path.join(
-    os.homedir(),
-    "Library",
-    "Caches",
-    "voxel-mesh-viewer",
-    "vxz",
-  ));
+  const cacheRoot = path.resolve(options.cacheRoot ?? defaultVxzCacheRoot());
   const python = resolvePython(projectRoot, options.python);
   const spawnWorker = options.spawn ?? spawn;
   const cacheReader = options.cacheReader ?? readCompleteCache;
@@ -224,7 +218,7 @@ function createVxzApi(options = {}) {
 
   function startPrepare(job) {
     activePrepareWorkers += 1;
-    const args = [workerScript, "prepare", job.sourcePath, job.jobDir];
+    const args = ["-B", workerScript, "prepare", job.sourcePath, job.jobDir];
     if (job.resolution !== null) {
       args.push("--resolution", String(job.resolution));
     }
@@ -232,6 +226,7 @@ function createVxzApi(options = {}) {
       cwd: projectRoot,
       env: workerEnv,
       stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
     });
     job.child = child;
     let stdout = "";
@@ -381,10 +376,11 @@ function createVxzApi(options = {}) {
     const jobDir = job.jobDir;
 
     activeSliceWorkers.get(id)?.kill("SIGTERM");
-    child = spawnWorker(python, [workerScript, "slice", jobDir, axis, String(index)], {
+    child = spawnWorker(python, ["-B", workerScript, "slice", jobDir, axis, String(index)], {
       cwd: projectRoot,
       env: workerEnv,
       stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
     });
     activeSliceWorkers.set(id, child);
     let started = false;
@@ -500,22 +496,42 @@ function runAsync(response, promise) {
 }
 
 function resolvePython(projectRoot, explicit) {
+  const fallbackCommand = process.platform === "win32" ? "python.exe" : "python3";
   const candidates = [
     explicit,
     process.env.VXZ_PYTHON,
+    path.join(projectRoot, "python", "python.exe"),
     path.join(projectRoot, "python", "bin", "python3"),
+    path.join(projectRoot, ".venv-vxz", "Scripts", "python.exe"),
     path.join(projectRoot, ".venv-vxz", "bin", "python"),
-    "python3",
+    fallbackCommand,
   ].filter(Boolean);
-  return candidates.find((candidate) => candidate === "python3" || fs.existsSync(candidate)) ?? "python3";
+  return candidates.find((candidate) => candidate === fallbackCommand || fs.existsSync(candidate)) ?? fallbackCommand;
+}
+
+function defaultVxzCacheRoot() {
+  if (process.platform === "win32") {
+    const localAppData = process.env.LOCALAPPDATA
+      || path.join(os.homedir(), "AppData", "Local");
+    return path.join(localAppData, "voxel-mesh-viewer", "Cache", "vxz");
+  }
+  if (process.platform === "darwin") {
+    return path.join(os.homedir(), "Library", "Caches", "voxel-mesh-viewer", "vxz");
+  }
+  return path.join(
+    process.env.XDG_CACHE_HOME || path.join(os.homedir(), ".cache"),
+    "voxel-mesh-viewer",
+    "vxz",
+  );
 }
 
 function resolveWorkerEnvironment(projectRoot) {
   const sitePackages = path.join(projectRoot, "site-packages");
+  const environment = { ...process.env, PYTHONDONTWRITEBYTECODE: "1" };
   if (!fs.existsSync(sitePackages)) {
-    return process.env;
+    return environment;
   }
-  return { ...process.env, PYTHONPATH: sitePackages };
+  return { ...environment, PYTHONPATH: sitePackages };
 }
 
 function readyJob(id, sourceName, jobDir, sourcePath, metadata) {

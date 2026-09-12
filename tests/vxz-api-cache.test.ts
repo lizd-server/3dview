@@ -115,3 +115,22 @@ test("does not spawn a slice worker when the client aborts during cache restore"
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("discovers the embedded Windows Python runtime layout", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "vxz-windows-python-"));
+  const pythonDir = path.join(root, "python");
+  const pythonExe = path.join(pythonDir, "python.exe");
+  await mkdir(pythonDir);
+  await writeFile(pythonExe, "placeholder");
+
+  const api = createVxzApi({
+    cacheRoot: path.join(root, "cache"),
+    projectRoot: root,
+  });
+  try {
+    assert.equal(api.python, pythonExe);
+  } finally {
+    api.dispose();
+    await rm(root, { recursive: true, force: true });
+  }
+});

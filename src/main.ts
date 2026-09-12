@@ -108,10 +108,26 @@ interface ElectronVxzOpenRequest {
   sourceName: string;
 }
 
+interface ElectronFieldOpenFile {
+  requestId: string;
+  name: string;
+  webkitRelativePath: string;
+  size: number;
+}
+
+interface ElectronFieldOpenRequest {
+  requestId: string;
+  sourceName: string;
+  files: ElectronFieldOpenFile[];
+  error?: string;
+}
+
 declare global {
   interface Window {
     voxelMeshViewer?: {
       onOpenVxzRequest(callback: (payload: ElectronVxzOpenRequest) => void): void;
+      onOpenFieldRequest(callback: (payload: ElectronFieldOpenRequest) => void): void;
+      completeFieldOpen(requestId: string): void;
       openVxzFile(requestId: string, resolution: number | null): Promise<VxzJobResponse>;
       getVxzResolution(): Promise<number | null>;
       setVxzResolution(resolution: number | null): Promise<void>;
@@ -127,6 +143,7 @@ const DOT_BACKGROUND: [number, number, number] = [238, 242, 247];
 const NO_DATA_COLOR: [number, number, number] = [148, 163, 184];
 const URL_PARAMS = new URLSearchParams(window.location.search);
 const IS_ELECTRON_APP = URL_PARAMS.has("electron");
+const ELECTRON_PLATFORM = URL_PARAMS.get("platform");
 const REMOTE_API_BASE = URL_PARAMS.get("apiBase") ?? "http://127.0.0.1:5175/api/remote";
 const VXZ_API_BASE = (() => {
   const value = new URL(REMOTE_API_BASE, window.location.href);
@@ -164,6 +181,9 @@ const VXZ_FALLBACK_CASES: Array<{
 
 if (IS_ELECTRON_APP) {
   document.documentElement.classList.add("electron-app");
+  if (ELECTRON_PLATFORM === "win32") {
+    document.documentElement.classList.add("windows-app");
+  }
 }
 
 for (let dy = -2; dy <= 2; dy += 1) {
@@ -641,6 +661,13 @@ class MeshSliceViewer {
     this.fieldInput.addEventListener("change", () => void this.loadSelectedFields());
     this.meshInput.addEventListener("change", () => void this.loadSelectedMeshFile());
     this.vxzInput.addEventListener("change", () => void this.loadSelectedVxz());
+    window.voxelMeshViewer?.onOpenFieldRequest((request) => {
+      void this.openAssociatedField(request).catch((error) => {
+        if (!isAbortError(error)) {
+          this.setStatus(errorMessage(error));
+        }
+      });
+    });
     window.voxelMeshViewer?.onOpenVxzRequest((request) => {
       void this.openAssociatedVxz(request).catch((error) => {
         if (!isAbortError(error)) {
@@ -1708,6 +1735,30 @@ class MeshSliceViewer {
     sourceToken?: number,
   ): Promise<void> {
     await this.loadVxzSource(sourceName, `Opening VXZ ${sourceName}`, async () => job, sourceToken);
+  }
+
+  private async openAssociatedField(request: ElectronFieldOpenRequest): Promise<void> {
+    const bridge = window.voxelMeshViewer;
+    if (!bridge) {
+      throw new Error("Electron field bridge is unavailable");
+    }
+    try {
+      if (request.error) {
+        throw new Error(`Could not open ${request.sourceName}: ${request.error}`);
+      }
+      if (request.files.length === 0) {
+        throw new Error(`Could not open ${request.sourceName}: no readable files were supplied`);
+      }
+      const files = request.files.map((file) => new ElectronFileHandle(
+        file.requestId,
+        file.name,
+        file.webkitRelativePath,
+        file.size,
+      ));
+      await this.loadPipelineFolder(files, request.sourceName, { replaceMeshes: false });
+    } finally {
+      bridge.completeFieldOpen(request.requestId);
+    }
   }
 
   private async openAssociatedVxz(request: ElectronVxzOpenRequest): Promise<void> {
@@ -3962,6 +4013,69 @@ interface PipelineFolderCandidate {
   cases?: SourceFile;
   insideFiltered?: SourceFile;
   surfaceBoundary?: SourceFile;
+}
+
+class ElectronFileHandle implements SourceFile {
+  constructor(
+    private readonly requestId: string,
+    readonly name: string,
+    readonly webkitRelativePath: string,
+    private readonly size: number,
+  ) {}
+
+  async arrayBuffer(onProgress?: ProgressCallback, signal?: AbortSignal): Promise<ArrayBuffer> {
+    const url = new URL("/api/native-file", window.location.href);
+    url.searchParams.set("requestId", this.requestId);
+    const response = await fetch(url, { signal });
+    if (!response.ok) {
+      throw new Error(await responseError(response));
+    }
+
+    if (!response.body) {
+      const buffer = await response.arrayBuffer();
+      this.verifySize(buffer.byteLength);
+      onProgress?.({ loaded: buffer.byteLength, total: this.size });
+      return buffer;
+    }
+
+    const reader = response.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let loaded = 0;
+    while (true) {
+      if (signal?.aborted) {
+        await reader.cancel();
+        throw new DOMException("The operation was aborted.", "AbortError");
+      }
+      const result = await reader.read();
+      if (result.done) {
+        break;
+      }
+      chunks.push(result.value);
+      loaded += result.value.byteLength;
+      onProgress?.({ loaded, total: this.size });
+    }
+
+    this.verifySize(loaded);
+    const bytes = new Uint8Array(loaded);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    return bytes.buffer;
+  }
+
+  async text(onProgress?: ProgressCallback, signal?: AbortSignal): Promise<string> {
+    return new TextDecoder().decode(await this.arrayBuffer(onProgress, signal));
+  }
+
+  private verifySize(actualSize: number): void {
+    if (actualSize !== this.size) {
+      throw new Error(
+        `Local file ${this.name} ended at ${formatBytes(actualSize)}; expected ${formatBytes(this.size)}.`,
+      );
+    }
+  }
 }
 
 const remoteFileDownloads = new Map<string, RemoteFileDownloadEntry>();

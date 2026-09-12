@@ -143,9 +143,47 @@ Register the installed app as the macOS default for `.vxz` files with:
 npm run mac:register-vxz
 ```
 
+Register it as the default for `.npy` files with:
+
+```bash
+npm run mac:register-npy
+```
+
+Double-clicked `.npy` files open in the generic field inspector. A supported
+metadata JSON file in the same directory is loaded automatically. See the
+[`.npy` default-app guide](docs/NPY_FILE_ASSOCIATION.md) for macOS and Windows
+setup, verification, metadata behavior, and troubleshooting.
+
 After registration, double-clicking a `.vxz` file launches the viewer and automatically loads that file. Finder opens use the explicit **VXZ resolution** saved in Options; when that field is blank they use Auto, like the in-app file picker. The app stores this preference under its stable macOS Application Support directory, so it survives the app's random internal port changing between launches.
 
 Double-clicking the app opens a native macOS application window, not an external browser. The packaged app serves the built frontend and the read-only remote-file API inside the Electron main process on an app-owned loopback port, so PM2, Vite, and fixed ports such as `5173`/`5175` are not required for normal app use.
+
+## Windows App
+
+Create a portable Windows 10/11 x64 build with:
+
+```bash
+npm run win:app
+```
+
+The command writes both an unpacked application and a ZIP archive:
+
+- `dist-win/Voxel Mesh Viewer-win32-x64/Voxel Mesh Viewer.exe`
+- `dist-win/Voxel-Mesh-Viewer-windows-x64.zip`
+
+The first build downloads pinned official Windows x64 packages for embedded
+Python and NumPy into `.windows-runtime-cache`; later builds reuse the verified
+downloads. The portable app includes the generic field/mesh views and the VXZ
+decoder. Extract the entire ZIP before launching `Voxel Mesh Viewer.exe`.
+
+Opening a `.vxz` or `.npy` through **Open with** or as a command-line argument is
+supported. The portable ZIP does not register a Windows file association; the
+[`.npy` default-app guide](docs/NPY_FILE_ASSOCIATION.md#windows-make-the-portable-build-the-default)
+shows how to select the extracted executable once and make it the default.
+Remote browsing uses `ssh.exe` from the Windows OpenSSH Client; set
+`REMOTE_VIEWER_SSH_BIN` when the executable is installed outside `PATH`.
+This build is not Authenticode-signed, so Windows SmartScreen may ask for
+confirmation on its first launch.
 
 ## Input Folder
 

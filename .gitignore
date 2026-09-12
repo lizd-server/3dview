@@ -1,8 +1,10 @@
 node_modules/
 dist/
 dist-mac/
+dist-win/
 .venv-vxz/
 .vxz-runtime-build/
+.windows-runtime-cache/
 __pycache__/
 .logs/
 assets/AppIcon.iconset/

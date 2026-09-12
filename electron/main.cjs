@@ -11,7 +11,8 @@ const {
 const { createVxzApi } = require("../server/vxz-api.cjs");
 
 const HOST = "127.0.0.1";
-const SSH_BIN = "/usr/bin/ssh";
+const SSH_BIN = process.env.REMOTE_VIEWER_SSH_BIN
+  || (process.platform === "win32" ? "ssh.exe" : "/usr/bin/ssh");
 const remoteHostPolicy = createRemoteHostPolicy(process.env[REMOTE_HOST_ALLOWLIST_ENV]);
 
 let mainWindow = null;
@@ -23,19 +24,53 @@ let vxzResolutionPreference = null;
 let vxzPreferenceWrite = Promise.resolve();
 const pendingVxzPaths = [];
 const pendingVxzRequests = new Map();
+const pendingFieldPaths = [];
+const pendingFieldRequests = new Map();
+const nativeFileRequests = new Map();
+const FIELD_MANIFEST_NAMES = [
+  "fields.json",
+  "field_metadata.json",
+  "npy_fields.json",
+  "npy_labels.json",
+];
+let flushingFieldPaths = false;
 
 app.setName("Voxel Mesh Viewer");
 
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
+if (!hasSingleInstanceLock) {
+  app.quit();
+} else if (process.platform === "win32") {
+  queueOpenFileArguments(process.argv, process.cwd());
+}
+
+app.on("second-instance", (_event, commandLine, workingDirectory) => {
+  queueOpenFileArguments(commandLine, workingDirectory);
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    if (mainWindow.isMinimized()) {
+      mainWindow.restore();
+    }
+    mainWindow.show();
+    mainWindow.focus();
+  }
+});
+
 app.on("open-file", (event, filePath) => {
   event.preventDefault();
-  queueVxzPath(filePath);
+  queueOpenFilePath(filePath);
 });
 
 ipcMain.on("vxz:renderer-ready", (event) => {
   if (mainWindow && event.sender === mainWindow.webContents) {
     rendererReadyForFiles = true;
     void flushPendingVxzPaths();
+    void flushPendingFieldPaths();
   }
+});
+
+ipcMain.on("field:open-file-complete", (event, requestId) => {
+  assertViewerSender(event.sender);
+  completeFieldOpenRequest(String(requestId ?? ""));
 });
 
 ipcMain.handle("vxz:open-file-open", async (event, payload) => {
@@ -63,18 +98,20 @@ ipcMain.handle("vxz:set-resolution", async (event, resolution) => {
   await saveVxzPreferences();
 });
 
-app.whenReady().then(async () => {
-  try {
-    setRuntimeAppIcon();
-    await loadVxzPreferences();
-    const url = await startAppServer();
-    appServerUrl = url;
-    createWindow(url);
-  } catch (error) {
-    await showStartupError(error);
-    app.quit();
-  }
-});
+if (hasSingleInstanceLock) {
+  app.whenReady().then(async () => {
+    try {
+      setRuntimeAppIcon();
+      await loadVxzPreferences();
+      const url = await startAppServer();
+      appServerUrl = url;
+      createWindow(url);
+    } catch (error) {
+      await showStartupError(error);
+      app.quit();
+    }
+  });
+}
 
 app.on("activate", () => {
   if (BrowserWindow.getAllWindows().length === 0) {
@@ -112,9 +149,12 @@ async function startAppServer() {
     throw new Error(`Missing built frontend at ${indexPath}. Run npm run build before packaging.`);
   }
 
-  const vxzRuntimeRoot = app.isPackaged
-    ? path.join(process.resourcesPath, ".vxz-runtime-build")
-    : app.getAppPath();
+  const packagedVxzRuntime = path.join(process.resourcesPath, "vxz-runtime");
+  const vxzRuntimeRoot = app.isPackaged && fs.existsSync(packagedVxzRuntime)
+    ? packagedVxzRuntime
+    : app.isPackaged
+      ? path.join(process.resourcesPath, ".vxz-runtime-build")
+      : app.getAppPath();
   vxzApi = createVxzApi({
     projectRoot: vxzRuntimeRoot,
     cacheRoot: path.join(app.getPath("cache"), "vxz"),
@@ -135,6 +175,10 @@ async function startAppServer() {
       handleRemoteRequest(request, response, url);
       return;
     }
+    if (url.pathname === "/api/native-file") {
+      handleNativeFile(request, response, url);
+      return;
+    }
 
     handleStaticFile(request, response, url, distDir, indexPath);
   });
@@ -150,15 +194,13 @@ async function startAppServer() {
 function createWindow(url) {
   const icon = loadRuntimeAppIcon();
   rendererReadyForFiles = false;
-  mainWindow = new BrowserWindow({
+  const windowOptions = {
     width: 1360,
     height: 800,
     minWidth: 1060,
     minHeight: 660,
     title: "Voxel Mesh Viewer",
     backgroundColor: "#eef2f7",
-    titleBarStyle: "hiddenInset",
-    trafficLightPosition: { x: 14, y: 14 },
     icon,
     show: false,
     webPreferences: {
@@ -167,13 +209,25 @@ function createWindow(url) {
       sandbox: true,
       preload: path.join(app.getAppPath(), "electron", "preload.cjs"),
     },
-  });
+  };
+  if (process.platform === "darwin") {
+    windowOptions.titleBarStyle = "hiddenInset";
+    windowOptions.trafficLightPosition = { x: 14, y: 14 };
+  }
+  mainWindow = new BrowserWindow(windowOptions);
 
   mainWindow.on("closed", () => {
     for (const filePath of pendingVxzRequests.values()) {
       pendingVxzPaths.unshift(filePath);
     }
     pendingVxzRequests.clear();
+    for (const request of pendingFieldRequests.values()) {
+      pendingFieldPaths.unshift(request.primaryPath);
+      for (const fileRequestId of request.fileRequestIds) {
+        nativeFileRequests.delete(fileRequestId);
+      }
+    }
+    pendingFieldRequests.clear();
     mainWindow = null;
     rendererReadyForFiles = false;
   });
@@ -189,8 +243,27 @@ function createWindow(url) {
 
   const appUrl = new URL(url);
   appUrl.searchParams.set("electron", "1");
+  appUrl.searchParams.set("platform", process.platform);
   appUrl.searchParams.set("apiBase", "/api/remote");
   mainWindow.loadURL(appUrl.toString());
+}
+
+function queueOpenFileArguments(commandLine, workingDirectory) {
+  for (const argument of commandLine) {
+    if (typeof argument !== "string" || ![".npy", ".vxz"].includes(path.extname(argument).toLowerCase())) {
+      continue;
+    }
+    queueOpenFilePath(path.isAbsolute(argument) ? argument : path.resolve(workingDirectory, argument));
+  }
+}
+
+function queueOpenFilePath(filePath) {
+  const extension = path.extname(filePath).toLowerCase();
+  if (extension === ".vxz") {
+    queueVxzPath(filePath);
+  } else if (extension === ".npy") {
+    queueFieldPath(filePath);
+  }
 }
 
 function queueVxzPath(filePath) {
@@ -225,6 +298,121 @@ async function flushPendingVxzPaths() {
       requestId,
       sourceName: path.basename(filePath),
     });
+  }
+}
+
+function queueFieldPath(filePath) {
+  if (path.extname(filePath).toLowerCase() !== ".npy") {
+    return;
+  }
+  pendingFieldPaths.push(path.resolve(filePath));
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.show();
+    mainWindow.focus();
+  }
+  if (app.isReady()) {
+    void flushPendingFieldPaths();
+  }
+}
+
+async function flushPendingFieldPaths() {
+  if (
+    flushingFieldPaths
+    || !rendererReadyForFiles
+    || !appServerUrl
+    || !mainWindow
+    || mainWindow.isDestroyed()
+  ) {
+    return;
+  }
+
+  flushingFieldPaths = true;
+  try {
+    while (
+      pendingFieldPaths.length > 0
+      && rendererReadyForFiles
+      && mainWindow
+      && !mainWindow.isDestroyed()
+    ) {
+      const filePath = pendingFieldPaths.shift();
+      try {
+        const request = await createFieldOpenRequest(filePath);
+        if (!mainWindow || mainWindow.isDestroyed()) {
+          completeFieldOpenRequest(request.requestId);
+          pendingFieldPaths.unshift(filePath);
+          break;
+        }
+        mainWindow.webContents.send("field:open-file-request", request);
+      } catch (error) {
+        mainWindow.webContents.send("field:open-file-request", {
+          requestId: crypto.randomUUID(),
+          sourceName: path.basename(filePath),
+          files: [],
+          error: errorMessage(error),
+        });
+      }
+    }
+  } finally {
+    flushingFieldPaths = false;
+  }
+}
+
+async function createFieldOpenRequest(primaryPath) {
+  const resolvedPrimaryPath = path.resolve(primaryPath);
+  const primaryStat = await fs.promises.stat(resolvedPrimaryPath);
+  if (!primaryStat.isFile() || primaryStat.size <= 0) {
+    throw new Error("NumPy input must be a non-empty regular file");
+  }
+
+  const directoryPath = path.dirname(resolvedPrimaryPath);
+  const directoryName = path.basename(directoryPath) || "opened-field";
+  const inputFiles = [{ filePath: resolvedPrimaryPath, stat: primaryStat }];
+  for (const manifestName of FIELD_MANIFEST_NAMES) {
+    const manifestPath = path.join(directoryPath, manifestName);
+    try {
+      const stat = await fs.promises.stat(manifestPath);
+      if (stat.isFile()) {
+        inputFiles.push({ filePath: manifestPath, stat });
+      }
+    } catch (error) {
+      if (error?.code !== "ENOENT") {
+        throw error;
+      }
+    }
+  }
+
+  const requestId = crypto.randomUUID();
+  const fileRequestIds = [];
+  const files = inputFiles.map(({ filePath, stat }) => {
+    const fileRequestId = crypto.randomUUID();
+    fileRequestIds.push(fileRequestId);
+    nativeFileRequests.set(fileRequestId, { filePath, size: stat.size });
+    return {
+      requestId: fileRequestId,
+      name: path.basename(filePath),
+      webkitRelativePath: `${directoryName}/${path.basename(filePath)}`,
+      size: stat.size,
+    };
+  });
+  pendingFieldRequests.set(requestId, {
+    primaryPath: resolvedPrimaryPath,
+    fileRequestIds,
+  });
+  return {
+    requestId,
+    sourceName: path.basename(resolvedPrimaryPath),
+    files,
+  };
+}
+
+function completeFieldOpenRequest(requestId) {
+  const request = pendingFieldRequests.get(requestId);
+  if (!request) {
+    return;
+  }
+  pendingFieldRequests.delete(requestId);
+  for (const fileRequestId of request.fileRequestIds) {
+    nativeFileRequests.delete(fileRequestId);
   }
 }
 
@@ -378,6 +566,54 @@ function loadRuntimeAppIcon() {
   return icon.isEmpty() ? undefined : icon;
 }
 
+function handleNativeFile(request, response, url) {
+  if (request.method !== "GET") {
+    sendText(response, 405, "Only GET is supported");
+    return;
+  }
+
+  const requestId = url.searchParams.get("requestId") ?? "";
+  const source = nativeFileRequests.get(requestId);
+  if (!source) {
+    sendText(response, 404, "This file-open request has expired");
+    return;
+  }
+
+  void fs.promises.stat(source.filePath)
+    .then((stat) => {
+      if (!stat.isFile() || stat.size !== source.size) {
+        sendText(response, 409, "The selected file changed before it could be opened");
+        return;
+      }
+
+      const stream = fs.createReadStream(source.filePath);
+      stream.on("error", (error) => {
+        if (!response.headersSent) {
+          sendText(response, 500, errorMessage(error));
+        } else {
+          response.destroy(error);
+        }
+      });
+      response.writeHead(200, {
+        "Cache-Control": "no-store",
+        "Content-Type": contentType(source.filePath),
+        "Content-Length": stat.size,
+        "X-Content-Type-Options": "nosniff",
+      });
+      response.on("close", () => {
+        if (!response.writableEnded) {
+          stream.destroy();
+        }
+      });
+      stream.pipe(response);
+    })
+    .catch((error) => {
+      if (!response.headersSent) {
+        sendText(response, error?.code === "ENOENT" ? 404 : 500, errorMessage(error));
+      }
+    });
+}
+
 function handleStaticFile(request, response, url, distDir, indexPath) {
   if (request.method !== "GET") {
     sendText(response, 405, "Only GET is supported");
@@ -483,7 +719,7 @@ function handleRemoteFile(request, response, host, remotePath) {
     "ConnectTimeout=8",
     host,
     remoteCommand(FILE_SCRIPT, [remotePath]),
-  ], { stdio: ["ignore", "pipe", "pipe"] });
+  ], { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
   let stderr = "";
   let started = false;
 
@@ -492,7 +728,6 @@ function handleRemoteFile(request, response, host, remotePath) {
       started = true;
       response.writeHead(200, {
         "Content-Type": "application/octet-stream",
-        "Content-Disposition": `attachment; filename="${path.basename(remotePath).replaceAll('"', "")}"`,
       });
     }
     response.write(chunk);
@@ -536,7 +771,7 @@ function sshJson(host, script, args = []) {
       "ConnectTimeout=8",
       host,
       remoteCommand(script, args),
-    ], { stdio: ["ignore", "pipe", "pipe"] });
+    ], { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
 
     let stdout = "";
     let stderr = "";

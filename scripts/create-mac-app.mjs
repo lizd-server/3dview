@@ -65,10 +65,12 @@ try {
 }
 
 applyBundleIcon(appDir);
+signBundle(appDir);
 await rm(installDir, { recursive: true, force: true });
 run("ditto", [appDir, installDir]);
 applyBundleIcon(installDir);
 await chmod(path.join(installDir, "Contents", "MacOS", appName), 0o755);
+signBundle(installDir);
 run("xattr", ["-dr", "com.apple.quarantine", installDir], { allowFailure: true });
 run("touch", [installDir], { allowFailure: true });
 
@@ -132,6 +134,12 @@ function applyBundleIcon(bundleDir) {
   run("cp", [dockIconPath, path.join(resourcesDir, "app-icon.png")]);
   run("/usr/libexec/PlistBuddy", ["-c", "Set :CFBundleIconFile app-icon.icns", plistPath]);
   configureVxzDocumentType(plistPath);
+}
+
+function signBundle(bundleDir) {
+  run("xattr", ["-cr", bundleDir]);
+  run("codesign", ["--force", "--deep", "--sign", "-", "--timestamp=none", bundleDir]);
+  run("codesign", ["--verify", "--deep", "--strict", bundleDir]);
 }
 
 function configureVxzDocumentType(plistPath) {

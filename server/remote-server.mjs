@@ -3,11 +3,14 @@ import http from "node:http";
 import { basename } from "node:path";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import remoteHostPolicyModule from "./remote-host-policy.cjs";
 import vxzApiModule from "./vxz-api.cjs";
 
 const PORT = Number(process.env.REMOTE_VIEWER_PORT ?? 5175);
 const HOST = "127.0.0.1";
-const ALLOWED_HOSTS = new Set(["126781"]);
+const remoteHostPolicy = remoteHostPolicyModule.createRemoteHostPolicy(
+  process.env[remoteHostPolicyModule.REMOTE_HOST_ALLOWLIST_ENV],
+);
 const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const vxzApi = vxzApiModule.createVxzApi({
   projectRoot: PROJECT_ROOT,
@@ -89,8 +92,8 @@ const server = http.createServer((request, response) => {
   }
 
   const host = url.searchParams.get("host") ?? "";
-  if (!ALLOWED_HOSTS.has(host)) {
-    sendText(response, 400, "Unsupported remote host");
+  if (!remoteHostPolicy.isAllowed(host)) {
+    sendText(response, 400, "Unsupported remote host. Check REMOTE_VIEWER_ALLOWED_HOSTS.");
     return;
   }
 

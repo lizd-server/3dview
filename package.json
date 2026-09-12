@@ -8,6 +8,8 @@
     "dev": "node scripts/dev.mjs",
     "dev:client": "vite --host 127.0.0.1",
     "dev:server": "node server/remote-server.mjs",
+    "test": "node --experimental-strip-types --test tests/*.test.ts",
+    "test:vxz": ".venv-vxz/bin/python -m unittest discover -s tests -p 'test_*.py'",
     "pm2:start": "pm2 start ecosystem.config.cjs",
     "pm2:stop": "pm2 delete ecosystem.config.cjs",
     "pm2:logs": "pm2 logs voxel-viewer-backend voxel-viewer-vite",

@@ -4,11 +4,15 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const http = require("node:http");
 const path = require("node:path");
+const {
+  createRemoteHostPolicy,
+  REMOTE_HOST_ALLOWLIST_ENV,
+} = require("../server/remote-host-policy.cjs");
 const { createVxzApi } = require("../server/vxz-api.cjs");
 
 const HOST = "127.0.0.1";
 const SSH_BIN = "/usr/bin/ssh";
-const REMOTE_HOST_PATTERN = /^(?!-)[A-Za-z0-9_.@-]{1,128}$/;
+const remoteHostPolicy = createRemoteHostPolicy(process.env[REMOTE_HOST_ALLOWLIST_ENV]);
 
 let mainWindow = null;
 let appServer = null;
@@ -463,7 +467,7 @@ function handleRemoteRequest(request, response, url) {
 }
 
 function isAllowedRemoteHost(host) {
-  return REMOTE_HOST_PATTERN.test(host);
+  return remoteHostPolicy.isAllowed(host);
 }
 
 function handleRemoteFile(request, response, host, remotePath) {

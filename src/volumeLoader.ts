@@ -1,8 +1,4 @@
-import {
-  type NumericArray,
-  type VolumeData,
-  type VolumeVisualization,
-} from "./types";
+import type { NpyArray3D, NpyNumericArray } from "./field-model.ts";
 
 interface NpyHeader {
   descr: string;
@@ -11,16 +7,29 @@ interface NpyHeader {
   dataOffset: number;
 }
 
-const decoder = new TextDecoder("latin1");
+const latin1Decoder = new TextDecoder("latin1");
+const utf8Decoder = new TextDecoder("utf-8");
 const HOST_IS_LITTLE_ENDIAN = (() => {
   const buffer = new ArrayBuffer(2);
   new DataView(buffer).setUint16(0, 256, true);
   return new Uint16Array(buffer)[0] === 256;
 })();
 
-export function parseNpy(buffer: ArrayBuffer, name: string): VolumeData {
+/** Rounds a numeric metadata value exactly as the declared NumPy float dtype stores it. */
+export function normalizeNumericValueForNpyDtype(value: number, dtype: string): number {
+  const match = /^[<>=|]?f(2|4|8)$/.exec(dtype.trim().toLowerCase());
+  if (!match || !Number.isFinite(value)) {
+    return value;
+  }
+  if (match[1] === "2") {
+    return halfToFloat(floatToHalf(value));
+  }
+  return match[1] === "4" ? Math.fround(value) : value;
+}
+
+export function parseNpy(buffer: ArrayBuffer, name: string): NpyArray3D {
   const bytes = new Uint8Array(buffer);
-  if (bytes.length < 12 || bytes[0] !== 0x93 || decoder.decode(bytes.slice(1, 6)) !== "NUMPY") {
+  if (bytes.length < 12 || bytes[0] !== 0x93 || latin1Decoder.decode(bytes.slice(1, 6)) !== "NUMPY") {
     throw new Error(`${name} is not a valid NumPy .npy file.`);
   }
 
@@ -39,59 +48,27 @@ export function parseNpy(buffer: ArrayBuffer, name: string): VolumeData {
     throw new Error(`Unsupported .npy version ${major}.`);
   }
 
-  const headerText = decoder.decode(bytes.slice(headerStart, headerStart + headerLength));
+  if (headerStart + headerLength > bytes.length) {
+    throw new Error("The .npy header is shorter than its declared length.");
+  }
+  const headerDecoder = major === 3 ? utf8Decoder : latin1Decoder;
+  const headerText = headerDecoder.decode(bytes.slice(headerStart, headerStart + headerLength));
   const header = parseHeader(headerText, headerStart + headerLength);
   const elementCount = header.shape.reduce((product, dimension) => product * dimension, 1);
   const warnings: string[] = [];
-  const data = decodeData(buffer, header.dataOffset, header.descr, elementCount, warnings);
-  const baseName = name
-    .split("/")
-    .pop()
-    ?.replace(/\.npy$/i, "")
-    .toLowerCase() ?? name.toLowerCase();
-  let visualization: VolumeVisualization;
-
-  if (
-    /^000_initial_ccl_labels$/.test(baseName)
-    || /^\d{3}_final_ccl_labels$/.test(baseName)
-    || /^\d{3}_inside_filtered_labels$/.test(baseName)
-    || /^\d{3}_free_space_labels$/.test(baseName)
-    || /^\d{3}_final_labels$/.test(baseName)
-  ) {
-    visualization = "pipelineLabels";
-  } else if (/^\d{3}_(original|closed)_boundary$/.test(baseName)) {
-    visualization = "boundaryMask";
-  } else if (/^\d{3}_final_ccl_components$/.test(baseName)) {
-    visualization = "finalCclComponents";
-  } else if (/^\d{3}_pseudo_boundary_components$/.test(baseName)) {
-    visualization = "componentLabels";
-  } else if (/^\d{3}_final_ccl_cases$/.test(baseName)) {
-    visualization = "finalCclCases";
-  } else if (/^\d{3}_surface_boundary_classification$/.test(baseName)) {
-    visualization = "surfaceBoundaryClassification";
-  } else if (/^999_scalar_field$/.test(baseName)) {
-    visualization = "scalarField";
-  } else if (/^999_linf_distance_cases$/.test(baseName)) {
-    visualization = "linfinityDistanceCases";
-  } else {
-    throw new Error(
-      `${name} is not a supported pipeline debug volume. Expected pipeline debug .npy files such as 000_original_boundary.npy, 001_closed_boundary.npy, 002_free_space_labels.npy, 003_pseudo_boundary_components.npy, 004_final_labels.npy, 000_initial_ccl_labels.npy, NNN_final_ccl_labels.npy, NNN_final_ccl_components.npy, NNN_final_ccl_cases.npy, MMM_inside_filtered_labels.npy, SSS_surface_boundary_classification.npy, 999_scalar_field.npy, or 999_linf_distance_cases.npy.`,
-    );
-  }
+  const data = decodeData(buffer, header.dataOffset, header.descr, elementCount);
 
   if (header.shape.length !== 3) {
-    throw new Error(`Expected a 3D pipeline volume, got shape (${header.shape.join(", ")}).`);
+    throw new Error(`Expected a 3D NumPy array, got shape (${header.shape.join(", ")}).`);
   }
 
   return {
     name,
-    shape: [header.shape[0], header.shape[1], header.shape[2]],
-    sourceShape: header.shape,
+    sourceShape: [header.shape[0], header.shape[1], header.shape[2]],
     data,
     dtype: header.descr,
     fortranOrder: header.fortranOrder,
     warnings,
-    visualization,
   };
 }
 
@@ -127,8 +104,7 @@ function decodeData(
   dataOffset: number,
   descr: string,
   count: number,
-  warnings: string[],
-): NumericArray {
+): NpyNumericArray {
   const byteOrder = descr[0];
   const kind = descr[1];
   const itemSize = Number(descr.slice(2));
@@ -190,20 +166,12 @@ function decodeData(
   }
 
   if ((kind === "i" || kind === "u") && itemSize === 8) {
-    const out = new Float64Array(count);
-    let unsafe = false;
+    const out = kind === "i" ? new BigInt64Array(count) : new BigUint64Array(count);
     for (let index = 0; index < count; index += 1) {
       const value = kind === "i"
         ? view.getBigInt64(index * 8, littleEndian)
         : view.getBigUint64(index * 8, littleEndian);
-      const asNumber = Number(value);
-      if (!Number.isSafeInteger(asNumber)) {
-        unsafe = true;
-      }
-      out[index] = asNumber;
-    }
-    if (unsafe) {
-      warnings.push("One or more 64-bit labels exceeded JavaScript's safe integer range.");
+      out[index] = value;
     }
     return out;
   }
@@ -246,4 +214,33 @@ function halfToFloat(value: number): number {
   }
 
   return sign * 2 ** (exponent - 15) * (1 + fraction / 2 ** 10);
+}
+
+function floatToHalf(value: number): number {
+  const buffer = new ArrayBuffer(4);
+  const floatView = new Float32Array(buffer);
+  const uintView = new Uint32Array(buffer);
+  floatView[0] = value;
+  const bits32 = uintView[0];
+  let bits16 = (bits32 >>> 16) & 0x8000;
+  let mantissa = (bits32 >>> 12) & 0x07ff;
+  const exponent = (bits32 >>> 23) & 0xff;
+
+  if (exponent < 103) {
+    return bits16;
+  }
+  if (exponent > 142) {
+    bits16 |= 0x7c00;
+    if (exponent === 255 && (bits32 & 0x007fffff) !== 0) {
+      bits16 |= 1;
+    }
+    return bits16;
+  }
+  if (exponent < 113) {
+    mantissa |= 0x0800;
+    bits16 |= (mantissa >>> (114 - exponent)) + ((mantissa >>> (113 - exponent)) & 1);
+    return bits16;
+  }
+  bits16 |= ((exponent - 112) << 10) | (mantissa >>> 1);
+  return bits16 + (mantissa & 1);
 }

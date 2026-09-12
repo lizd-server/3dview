@@ -19,6 +19,10 @@
               <span>Folder</span>
               <input id="folderInput" type="file" webkitdirectory multiple />
             </label>
+            <label class="file-control toolbar-item" data-tool="field">
+              <span>Open field</span>
+              <input id="fieldInput" type="file" accept=".npy,.json,application/json" multiple />
+            </label>
             <label class="file-control toolbar-item" data-tool="mesh">
               <span>Add mesh</span>
               <input id="meshInput" type="file" accept=".ply,.obj,.stl" multiple />
@@ -67,7 +71,7 @@
           <div id="loadProgress" class="load-progress hidden" role="status" aria-live="polite"></div>
 
           <label class="select-control stage-control hidden" id="arraySelectRow">
-            <span>Array</span>
+            <span>Field</span>
             <select id="arraySelect"></select>
           </label>
 
@@ -102,6 +106,88 @@
                   <span>VXZ resolution</span>
                   <input id="vxzResolution" type="number" min="1" step="1" placeholder="Auto" aria-label="VXZ resolution" />
                 </label>
+                <section id="fieldOptions" class="field-options hidden" aria-label="Field display and metadata">
+                  <div class="field-options-heading">
+                    <div>
+                      <span class="field-options-kicker">Field</span>
+                      <strong>Interpretation and coordinates</strong>
+                    </div>
+                    <p id="fieldMetadataSummary" class="field-metadata-summary" role="status" aria-live="polite">No field metadata loaded</p>
+                  </div>
+                  <div class="field-options-grid">
+                    <label class="select-control">
+                      <span>Semantic</span>
+                      <select id="fieldSemantic">
+                        <option value="categorical">Categorical labels</option>
+                        <option value="continuous">Continuous values</option>
+                      </select>
+                    </label>
+                    <label id="categoricalPresetControl" class="select-control">
+                      <span>Label preset</span>
+                      <select id="categoricalPreset">
+                        <option value="semantic">Semantic categories</option>
+                        <option value="instances">Components / instances</option>
+                      </select>
+                    </label>
+                    <label class="select-control">
+                      <span>Sampling</span>
+                      <select id="fieldAssociation">
+                        <option value="point">Grid points</option>
+                        <option value="cell">Cell centers</option>
+                      </select>
+                    </label>
+                    <label class="select-control">
+                      <span>Axis order</span>
+                      <select id="fieldAxisOrder">
+                        <option value="xyz">XYZ</option>
+                        <option value="xzy">XZY</option>
+                        <option value="yxz">YXZ</option>
+                        <option value="yzx">YZX</option>
+                        <option value="zxy">ZXY</option>
+                        <option value="zyx">ZYX</option>
+                      </select>
+                    </label>
+                    <label class="select-control field-coordinate-control">
+                      <span>Coordinates</span>
+                      <select id="fieldCoordinates">
+                        <option value="index">Index coordinates</option>
+                        <option value="normalized">Normalized grid [-1, 1]</option>
+                        <option value="custom">Custom transform</option>
+                      </select>
+                    </label>
+                  </div>
+                  <label id="fieldMatrixControl" class="field-matrix-control hidden">
+                    <span>indexToWorld · row-major 4 × 4</span>
+                    <textarea id="fieldIndexToWorld" rows="3" spellcheck="false" aria-label="Custom index to world matrix"></textarea>
+                  </label>
+                  <div id="continuousOptions" class="continuous-options hidden" aria-label="Continuous field display">
+                    <label class="select-control continuous-color-control">
+                      <span>Color map</span>
+                      <select id="continuousColorMap">
+                        <option value="sdf">SDF red / blue</option>
+                        <option value="diverging">Diverging</option>
+                        <option value="viridis">Viridis</option>
+                        <option value="grayscale">Grayscale</option>
+                      </select>
+                    </label>
+                    <label class="number-control">
+                      <span>Range min</span>
+                      <input id="continuousRangeMin" type="number" step="any" placeholder="Auto" />
+                    </label>
+                    <label class="number-control">
+                      <span>Range max</span>
+                      <input id="continuousRangeMax" type="number" step="any" placeholder="Auto" />
+                    </label>
+                    <label class="number-control">
+                      <span>Isovalue</span>
+                      <input id="continuousIsovalue" type="number" step="any" value="0" />
+                    </label>
+                    <label class="check-control continuous-contour-control">
+                      <input id="continuousContours" type="checkbox" />
+                      <span>Show contours</span>
+                    </label>
+                  </div>
+                </section>
                 <div id="vxzOptions" class="vxz-options hidden" aria-label="VXZ display options">
                   <label class="check-control">
                     <input id="vxzMeshVisible" type="checkbox" checked />
@@ -166,8 +252,8 @@
         <section class="slice-pane empty-state">
           <div class="pane-heading">
             <div>
-              <h2>Slice colors</h2>
-              <span id="renderStats">No volume loaded</span>
+              <h2>Exact slice</h2>
+              <span id="renderStats">No field loaded</span>
             </div>
             <label class="select-control slice-mode-control">
               <span>Mode</span>
@@ -181,13 +267,24 @@
             <canvas id="sliceCanvas" class="empty-state"></canvas>
             <canvas id="vxzDualOverlay" aria-hidden="true"></canvas>
           </div>
+          <div id="labelTools" class="label-tools hidden" aria-label="Label filters">
+            <input id="labelSearch" type="search" placeholder="Search label ID, name, or group" aria-label="Search labels" />
+            <span class="label-scope">Counts: current slice</span>
+            <button id="showAllLabels" type="button">Show all</button>
+          </div>
           <div id="legendList" class="legend-list"></div>
-          <dl id="inspectorList" class="inspector-list">
-            <dt>Grid</dt><dd>-</dd>
-            <dt>World</dt><dd>-</dd>
-            <dt>Label</dt><dd>-</dd>
-            <dt>Category</dt><dd>-</dd>
-          </dl>
+          <section class="inspector-panel" aria-label="Point inspector">
+            <div class="inspector-heading">
+              <span>Move to inspect · click to pin a linked point</span>
+              <button id="clearSelectedPoint" class="hidden" type="button">Clear point</button>
+            </div>
+            <dl id="inspectorList" class="inspector-list">
+              <dt>Grid</dt><dd>-</dd>
+              <dt>World</dt><dd>-</dd>
+              <dt>Label</dt><dd>-</dd>
+              <dt>Category</dt><dd>-</dd>
+            </dl>
+          </section>
         </section>
       </main>
     </div>

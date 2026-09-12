@@ -1,6 +1,7 @@
 # Interactive Mesh Slice Viewer
 
-Client-side Three.js viewer for inspecting pipeline label slices against mesh geometry in the shared `[-1, 1]^3` coordinate system.
+Client-side Three.js viewer for inspecting three-dimensional NumPy fields and
+pipeline label slices against mesh geometry.
 
 ## Run
 
@@ -148,7 +149,99 @@ Double-clicking the app opens a native macOS application window, not an external
 
 ## Input Folder
 
-Use the Folder input and select one pipeline output directory. The viewer loads every supported `.npy` that is present, so incomplete debug folders can still be inspected. A complete final CCL stage includes:
+Use the Folder input to select a directory. Every supported three-dimensional
+`.npy` file is available as a field; filenames do not have to follow the
+floodfill pipeline convention.
+
+### Generic `.npy` fields (Phase 1)
+
+A folder can include an optional `fields.json` beside its arrays. `defaults`
+apply to every field, and entries under `fields` override them by filename:
+
+```json
+{
+  "version": 1,
+  "defaults": {
+    "axisOrder": "zyx",
+    "association": "cell",
+    "coordinatePreset": "index"
+  },
+  "fields": {
+    "component_id.npy": {
+      "semantic": "categorical",
+      "categoricalPreset": "instances",
+      "validity": {
+        "noDataValues": ["-1"],
+        "description": "-1 was not evaluated"
+      },
+      "sparseDefault": "0",
+      "labels": {
+        "0": {
+          "name": "background",
+          "color": "#1f2933",
+          "background": true,
+          "hidden": true
+        },
+        "9007199254740993": {
+          "name": "part A",
+          "color": "#2563eb",
+          "group": "parts"
+        }
+      }
+    },
+    "sdf.npy": {
+      "semantic": "continuous",
+      "association": "point",
+      "indexToWorld": [
+        0.01, 0, 0, -1,
+        0, 0.01, 0, -1,
+        0, 0, 0.01, -1,
+        0, 0, 0, 1
+      ]
+    }
+  }
+}
+```
+
+- `semantic` is `categorical` for identities such as labels, components, and
+  cases, or `continuous` for quantities such as SDF, confidence, and error.
+- `categoricalPreset` is `semantic` for a small named label set or `instances`
+  for many component/instance IDs. It changes display behavior, not stored IDs.
+- `axisOrder` describes source-array dimensions in order. For example, `"zyx"`
+  means source shape `[Z, Y, X]`, which is exposed to the viewer as logical
+  shape `[X, Y, Z]`. An array may also use `["z", "y", "x"]`.
+- `association` is `point` when values live on grid nodes or `cell` when values
+  live at cell centers.
+- `coordinatePreset` is `index` for index-space coordinates or `normalized`
+  for a grid domain spanning `[-1, 1]` on each axis. For a custom mapping,
+  `indexToWorld` is a row-major affine 4 x 4 matrix multiplying
+  `[x, y, z, 1]`; it takes precedence over `coordinatePreset`.
+- `labels` is keyed by the exact decimal label ID. Each entry may define
+  `name`, six-digit hex `color`, `group`, `background`, and initial `hidden`
+  state. No particular ID, including `0`, is assumed to be background.
+- `validity.noDataValues` lists exact value keys that mean missing or invalid
+  data. `sparseDefault` records the value supplied for absent sparse samples;
+  neither is implicitly treated as background or as an unloaded region. No-data
+  samples use a neutral color and are excluded from label counts, automatic
+  continuous ranges, and contour interpolation.
+- `continuousStyle.range` accepts two increasing numbers. Set it to `null`, or
+  clear both range fields in the viewer, to calculate the display range from
+  valid field samples.
+
+Without metadata, a generic field uses `axisOrder: "xyz"`, point association,
+index coordinates, and the `semantic` categorical preset. Integer and boolean
+dtypes are suggested as categorical, while floating-point dtypes are suggested
+as continuous; explicit metadata can override that suggestion. Signed and
+unsigned 64-bit integer values remain exact, including IDs above JavaScript's
+safe integer range, and are not converted through floating point.
+
+### Legacy pipeline presets
+
+Known floodfill filenames still select the existing point-sampled normalized
+coordinates, field semantics, label meanings, and colors automatically.
+`fields.json` can override those presets, and the legacy `npy_labels.json`
+manifest remains supported. Incomplete debug folders can still be inspected.
+A complete final CCL stage includes:
 
 - `NNN_final_ccl_labels.npy`
 - `NNN_final_ccl_components.npy`
@@ -170,7 +263,7 @@ The viewer also loads earlier/later-stage and newer debug volumes when they are 
 
 If `.ply`, `.obj`, or `.stl` meshes are present in the selected pipeline directory, they are loaded with the volumes. For the current pipeline this usually includes both `voxel_input_mesh.ply` and `mesh.ply`. If meshes are missing, the viewer still shows the available slices.
 
-The Array dropdown controls which loaded pipeline stage is shown. Volumes are loaded on demand, so switching stages does not keep every `r=512` array in browser memory at the same time.
+The Field dropdown controls which loaded pipeline stage is shown. Fields are loaded on demand, so switching stages does not keep every `r=512` array in browser memory at the same time.
 
 Meshes are rendered in their source coordinates by default. Enable **Normalize
 imports to current size** in Options before using Add mesh or Remote Add to
@@ -182,25 +275,38 @@ Additional `.ply`, `.obj`, or `.stl` meshes can be added with Add mesh. The mesh
 
 ## Remote Folders
 
-The Remote panel defaults to `/mnt/bn/vai3d-hl-1/Users/lizd/work/floodfill/output` on `hl_gpu_2` through the local backend. The SSH host field is editable, so any safe local SSH alias such as `126781` can be used. The backend uses the existing local SSH configuration and only reads files.
+The Remote panel defaults to `/mnt/bn/vai3d-hl-1/Users/lizd/work/floodfill/output` on `hl_gpu_2` through the local backend. The backend accepts only the exact SSH aliases `hl_gpu_2` and `126781` by default, uses the existing local SSH configuration, and only reads files. To use a different set, start the backend or desktop app with `REMOTE_VIEWER_ALLOWED_HOSTS` set to a comma-separated allowlist, for example `REMOTE_VIEWER_ALLOWED_HOSTS=hl_gpu_2,research_gpu`. Each configured entry must also be a valid SSH host alias.
 
 1. Open Remote.
 2. Browse or enter a server path.
 3. Select Load current folder, or use a directory row's Load button to load that folder directly.
 
-Remote folders use the same required and optional file names as local folders. Meshes load when the folder is selected; `.npy` volumes are downloaded on demand when their Array entry is selected.
+Remote folders use the same generic `.npy`, optional `fields.json`, and legacy
+pipeline-preset rules as local folders. Meshes load when the folder is selected;
+`.npy` fields are downloaded on demand when their Field entry is selected.
 Remote mesh and `.npy` downloads show progress in the top bar. Downloaded remote files are stored in the browser's IndexedDB cache by remote path, size, and mtime, so loading the same unchanged remote file again avoids another SSH download without keeping every parsed volume in memory. Remote `.ply`, `.obj`, and `.stl` files can also be added directly from the Remote file list.
-Use Download current folder, or a directory row's Download button, to prefetch every recognized pipeline `.npy` plus mesh files into the browser cache without changing the current view.
+Use Download current folder, or a directory row's Download button, to prefetch
+supported `.npy` fields plus mesh files into the browser cache without changing
+the current view.
 
 ## Display
 
-- Left: 3D mesh view with an axis-aligned slice plane. The mesh is clipped in Polyscope-style inspection, keeping the positive side of the active slice plane.
-- Right: 2D color rendering of the selected label slice.
+- Left: 3D mesh view with a slice plane transformed by the field's `indexToWorld` metadata. The mesh is clipped in Polyscope-style inspection, keeping the positive side of the active slice plane.
+- Right: 2D color rendering of the selected field slice.
 
 The slice renderer has two modes:
 
 - Pixels: each grid point is drawn as one image pixel.
 - Corner dots: each grid point is drawn as a small circle at its grid-node position. The 3D slice plane uses a transparent dot texture, and the right-side slice panel uses a scrollable dot canvas. For `r=512`, the right-side canvas is about `2053 x 2053`.
+
+Options shows the resolved semantic, logical shape, source axis order, sampling
+association, and coordinate source. These values can be overridden without
+changing code, including a custom row-major `indexToWorld` matrix. Continuous
+fields provide an adjustable range, isovalue, color map, and exact-slice
+contours. Categorical fields provide current-slice counts plus search by exact
+ID, name, or group, with hide, isolate, and locked-highlight controls. Click a
+slice sample to pin its exact XYZ index and world position; switching X/Y/Z
+keeps all three slice indices linked to that point.
 
 Pipeline label arrays are sampled on grid nodes, not cell centers. Grid indices map to world space as:
 
@@ -267,4 +373,6 @@ The grid axes map directly to world axes: `[i, j, k] -> [x, y, z]`.
 
 ## Performance
 
-This version does not render 3D label voxels. It renders one label slice at a time, so an `r=512` pipeline output updates a `513 x 513` canvas instead of creating voxel geometry.
+This version does not render dense 3D field voxels. It renders one exact field
+slice at a time, so an `r=512` pipeline output updates a `513 x 513` canvas
+instead of creating voxel geometry.

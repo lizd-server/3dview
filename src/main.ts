@@ -6,18 +6,67 @@ import { OBJLoader } from "three/examples/jsm/loaders/OBJLoader.js";
 import { PLYLoader } from "three/examples/jsm/loaders/PLYLoader.js";
 import { STLLoader } from "three/examples/jsm/loaders/STLLoader.js";
 import {
-  CATEGORIES,
-  CATEGORY_ORDER,
-  categoryDisplayName,
-  classifyVolumeLabel,
-  type CategoryKey,
   type SliceAxis,
-  type VolumeData,
-  type VolumeLabelMetadata,
   type VxzColorMode,
   type VxzJobResponse,
   type VxzMetadata,
 } from "./types";
+import {
+  automaticContinuousRange,
+  categoricalColorForValue,
+  continuousColorForValue,
+  fieldValueKey,
+  formatFieldValue,
+  grayscaleColorForAmount,
+  isNoDataValue,
+  labelDefinitionForValue,
+  type DenseField,
+  type ContinuousStyle,
+  type FieldMetadataPatch,
+  type FieldValue,
+  type LabelSchema,
+  type SourceAxisOrder,
+} from "./field-model";
+import {
+  mergeFieldMetadataPatches,
+  parseFieldManifest,
+  resolveFieldDefinition,
+  type ParsedFieldManifest,
+} from "./field-metadata";
+import {
+  InMemoryFieldProvider,
+  type FieldProvider,
+  type FieldSlice,
+} from "./field-provider";
+import {
+  computeTransformedSlicePlaneFrame,
+  formatIndexToWorldText,
+  logicalDomainLimits,
+  parseIndexToWorldText,
+  slicePixelToLogicalIndex,
+  transformIndexToWorld,
+  worldDomainCorners,
+} from "./grid-field";
+import {
+  createLabelFilterState,
+  isLabelHighlighted,
+  isLabelVisible,
+  isolateLabel,
+  labelMatchesQuery,
+  lockLabelHighlight,
+  setLabelHidden,
+  setLabelQuery,
+  type LabelFilterState,
+} from "./label-filter";
+import {
+  applicablePipelineVisualization,
+  classifyPipelineValue,
+  inferPipelinePreset,
+  pipelineCategoryDisplayName,
+  pipelineColorForValue,
+  type PipelineCategoryKey,
+  type PipelineVisualization,
+} from "./pipeline-presets";
 import { normalizeObjectToPreferredBounds } from "./mesh-normalization";
 import { parseNpy } from "./volumeLoader";
 import {
@@ -31,9 +80,28 @@ import {
   vxzQefRankDescription,
 } from "./vxz-qef-rank";
 import { vxzDataUrl } from "./vxz-data-url";
+import {
+  activeSliceIndex,
+  clearPinnedPoint,
+  createViewerState,
+  pinGridPoint,
+  reconcileViewerState,
+  setActiveAxis,
+  setSliceIndex as updateViewerSliceIndex,
+  type ViewerState,
+} from "./viewer-state";
 
 type MeshMode = "solid" | "wireframe" | "transparent" | "solidWire";
 type SliceRenderMode = "pixels" | "cornerDots";
+type FieldSettingKind =
+  | "semantic"
+  | "categoricalPreset"
+  | "association"
+  | "axisOrder"
+  | "coordinates"
+  | "continuousRange"
+  | "continuousIsovalue"
+  | "continuousPalette";
 
 interface ElectronVxzOpenRequest {
   requestId: string;
@@ -56,7 +124,7 @@ const DOT_SPACING = 4;
 const DOT_RADIUS = 1.5;
 const DOT_MARGIN = 3;
 const DOT_BACKGROUND: [number, number, number] = [238, 242, 247];
-const SCALAR_DISTANCE_BLACK_THRESHOLD = 0.1;
+const NO_DATA_COLOR: [number, number, number] = [148, 163, 184];
 const URL_PARAMS = new URLSearchParams(window.location.search);
 const IS_ELECTRON_APP = URL_PARAMS.has("electron");
 const REMOTE_API_BASE = URL_PARAMS.get("apiBase") ?? "http://127.0.0.1:5175/api/remote";
@@ -81,6 +149,7 @@ const VXZ_MESH_HEADER_BYTES = 16;
 const VXZ_WORKER_FORMAT_VERSION = 3;
 const VXZ_VOXEL_RECORD_BYTES = 12;
 const VXZ_DUAL_MARKER_COLOR = "#ff2d55";
+const VIRIDIS_PALETTE = ["#440154", "#3b528b", "#21918c", "#5ec962", "#fde725"] as const;
 const LIGHTWEIGHT_WIREFRAME_FACE_THRESHOLD = 250_000;
 const VXZ_FALLBACK_CASES: Array<{
   color: [number, number, number];
@@ -109,13 +178,10 @@ for (let dy = -2; dy <= 2; dy += 1) {
 
 interface SliceSample {
   grid: [number, number, number];
-  worldIndex: [number, number, number];
   world: THREE.Vector3;
-  label: number;
-  category: CategoryKey | null;
+  value: FieldValue;
+  category: PipelineCategoryKey | null;
 }
-
-type PipelineVolumeRole = "label" | "components" | "cases" | "insideFiltered" | "surfaceBoundary";
 
 interface FileLoadProgress {
   loaded: number;
@@ -135,12 +201,15 @@ interface PipelineFolderSelection {
   directory: string;
   volumes: SourceFile[];
   meshes: SourceFile[];
-  manifest?: SourceFile;
+  manifests: SourceFile[];
 }
 
 interface VolumeSlot {
   name: string;
-  volume?: VolumeData;
+  volume?: DenseField;
+  provider?: FieldProvider;
+  userOverrides?: FieldMetadataPatch;
+  labelFilter?: LabelFilterState;
   file?: SourceFile;
 }
 
@@ -237,6 +306,7 @@ class MeshSliceViewer {
   private readonly statusText = getElement<HTMLElement>("statusText");
   private readonly renderStats = getElement<HTMLElement>("renderStats");
   private readonly folderInput = getElement<HTMLInputElement>("folderInput");
+  private readonly fieldInput = getElement<HTMLInputElement>("fieldInput");
   private readonly meshInput = getElement<HTMLInputElement>("meshInput");
   private readonly vxzInput = getElement<HTMLInputElement>("vxzInput");
   private readonly vxzResolution = getElement<HTMLInputElement>("vxzResolution");
@@ -274,7 +344,27 @@ class MeshSliceViewer {
   private readonly vxzPointSize = getElement<HTMLInputElement>("vxzPointSize");
   private readonly vxzPointSizeValue = getElement<HTMLOutputElement>("vxzPointSizeValue");
   private readonly legendList = getElement<HTMLElement>("legendList");
+  private readonly labelTools = getElement<HTMLElement>("labelTools");
+  private readonly labelSearch = getElement<HTMLInputElement>("labelSearch");
+  private readonly showAllLabels = getElement<HTMLButtonElement>("showAllLabels");
   private readonly inspectorList = getElement<HTMLElement>("inspectorList");
+  private readonly fieldOptions = getElement<HTMLElement>("fieldOptions");
+  private readonly fieldMetadataSummary = getElement<HTMLElement>("fieldMetadataSummary");
+  private readonly fieldSemantic = getElement<HTMLSelectElement>("fieldSemantic");
+  private readonly categoricalPreset = getElement<HTMLSelectElement>("categoricalPreset");
+  private readonly categoricalPresetControl = getElement<HTMLElement>("categoricalPresetControl");
+  private readonly fieldAssociation = getElement<HTMLSelectElement>("fieldAssociation");
+  private readonly fieldAxisOrder = getElement<HTMLSelectElement>("fieldAxisOrder");
+  private readonly fieldCoordinates = getElement<HTMLSelectElement>("fieldCoordinates");
+  private readonly fieldMatrixControl = getElement<HTMLElement>("fieldMatrixControl");
+  private readonly fieldIndexToWorld = getElement<HTMLTextAreaElement>("fieldIndexToWorld");
+  private readonly continuousOptions = getElement<HTMLElement>("continuousOptions");
+  private readonly continuousColorMap = getElement<HTMLSelectElement>("continuousColorMap");
+  private readonly continuousRangeMin = getElement<HTMLInputElement>("continuousRangeMin");
+  private readonly continuousRangeMax = getElement<HTMLInputElement>("continuousRangeMax");
+  private readonly continuousIsovalue = getElement<HTMLInputElement>("continuousIsovalue");
+  private readonly continuousContours = getElement<HTMLInputElement>("continuousContours");
+  private readonly clearSelectedPoint = getElement<HTMLButtonElement>("clearSelectedPoint");
 
   private readonly scene = new THREE.Scene();
   private readonly camera = new THREE.PerspectiveCamera(45, 1, 0.01, 100);
@@ -283,6 +373,11 @@ class MeshSliceViewer {
   private readonly meshRoot = new THREE.Group();
   private readonly voxelRoot = new THREE.Group();
   private readonly sliceRoot = new THREE.Group();
+  private readonly guideRoot = new THREE.Group();
+  private readonly selectionMarker = new THREE.Mesh(
+    new THREE.SphereGeometry(1, 18, 12),
+    new THREE.MeshBasicMaterial({ color: "#111827", depthTest: false }),
+  );
   private readonly meshClipPlane = new THREE.Plane(new THREE.Vector3(0, 0, -1), 0);
   private readonly meshClippingPlanes = [this.meshClipPlane];
   private readonly slicePlaneMaterial = new THREE.MeshBasicMaterial({
@@ -301,8 +396,16 @@ class MeshSliceViewer {
   );
 
   private volumeSlots: VolumeSlot[] = [];
-  private activeVolume: VolumeData | null = null;
-  private labelMetadataByFileName = new Map<string, VolumeLabelMetadata>();
+  private activeVolume: DenseField | null = null;
+  private activeProvider: FieldProvider | null = null;
+  private activeFieldSlice: FieldSlice | null = null;
+  private fieldManifest: ParsedFieldManifest | undefined;
+  private fieldManifestWarnings: string[] = [];
+  private fieldSliceAbort: AbortController | null = null;
+  private fieldSliceToken = 0;
+  private inspectorRequestToken = 0;
+  private readonly autoRanges = new WeakMap<DenseField, [number, number]>();
+  private sourceLoadToken = 0;
   private volumeLoadToken = 0;
   private nextLoadTaskId = 1;
   private readonly loadTasks = new Map<number, LoadTask>();
@@ -325,8 +428,7 @@ class MeshSliceViewer {
   private remoteParent = "";
   private remoteEntries: RemoteEntry[] = [];
   private remoteListToken = 0;
-  private sliceAxis: SliceAxis = "z";
-  private sliceIndex = 0;
+  private viewerState: ViewerState = createViewerState([1, 1, 1]);
   private slicePlaneHasTexture = false;
   private lastSliceRenderMode: SliceRenderMode = "pixels";
   private lastDotCanvasSize = "";
@@ -349,7 +451,10 @@ class MeshSliceViewer {
     this.sliceTextureContext = sliceTextureContext;
 
     this.scene.background = new THREE.Color("#f3f6fa");
-    this.scene.add(this.meshRoot, this.voxelRoot, this.sliceRoot);
+    this.scene.add(this.guideRoot, this.meshRoot, this.voxelRoot, this.sliceRoot, this.selectionMarker);
+    this.selectionMarker.name = "selected-field-point";
+    this.selectionMarker.visible = false;
+    this.selectionMarker.renderOrder = 40;
     document.body.append(this.remoteBrowser);
     this.remoteBrowser.classList.add("hidden");
 
@@ -371,20 +476,107 @@ class MeshSliceViewer {
   }
 
   private addSceneGuides(): void {
+    this.rebuildSceneGuides();
+  }
+
+  private rebuildSceneGuides(): void {
+    this.clearGroup(this.guideRoot);
+    if (this.activeVolume) {
+      this.addTransformedFieldGuides(this.activeVolume);
+      return;
+    }
     const bounds = new THREE.Box3(new THREE.Vector3(-1, -1, -1), new THREE.Vector3(1, 1, 1));
     const helper = new THREE.Box3Helper(bounds, new THREE.Color("#334155"));
     const helperMaterial = helper.material as THREE.LineBasicMaterial;
     helperMaterial.transparent = true;
     helperMaterial.opacity = 0.34;
-    this.scene.add(helper);
+    this.guideRoot.add(helper);
 
-    const axes = new THREE.AxesHelper(1.25);
-    axes.position.set(-1, -1, -1);
-    this.scene.add(axes);
+    const size = bounds.getSize(new THREE.Vector3());
+    const span = Math.max(size.x, size.y, size.z, 1e-6);
+    const axes = new THREE.AxesHelper(span * 0.24);
+    axes.position.copy(bounds.min);
+    this.guideRoot.add(axes);
 
-    const grid = new THREE.GridHelper(2, 8, "#8fa0b4", "#d6dde8");
-    grid.position.y = -1;
-    this.scene.add(grid);
+    const grid = new THREE.GridHelper(span, 8, "#8fa0b4", "#d6dde8");
+    grid.position.set(
+      (bounds.min.x + bounds.max.x) / 2,
+      bounds.min.y,
+      (bounds.min.z + bounds.max.z) / 2,
+    );
+    this.guideRoot.add(grid);
+  }
+
+  private addTransformedFieldGuides(field: DenseField): void {
+    const definition = field.definition;
+    const { min, max } = logicalDomainLimits(definition.logicalShape, definition.association);
+    const corners = worldDomainCorners(
+      definition.logicalShape,
+      definition.association,
+      definition.indexToWorld,
+    ).map(vectorFromWorldPoint);
+    const edgePairs = [
+      [0, 1], [0, 2], [0, 4], [1, 3], [1, 5], [2, 3],
+      [2, 6], [3, 7], [4, 5], [4, 6], [5, 7], [6, 7],
+    ] as const;
+    const edgePositions: number[] = [];
+    for (const [start, end] of edgePairs) {
+      edgePositions.push(...corners[start].toArray(), ...corners[end].toArray());
+    }
+    const edgeGeometry = new THREE.BufferGeometry();
+    edgeGeometry.setAttribute("position", new THREE.Float32BufferAttribute(edgePositions, 3));
+    const edges = new THREE.LineSegments(
+      edgeGeometry,
+      new THREE.LineBasicMaterial({ color: "#334155", transparent: true, opacity: 0.52 }),
+    );
+    this.guideRoot.add(edges);
+
+    const transform = (point: [number, number, number]): THREE.Vector3 => (
+      vectorFromWorldPoint(transformIndexToWorld(point, definition.indexToWorld))
+    );
+    const gridPositions: number[] = [];
+    for (let step = 0; step <= 8; step += 1) {
+      const amount = step / 8;
+      const x = THREE.MathUtils.lerp(min[0], max[0], amount);
+      const z = THREE.MathUtils.lerp(min[2], max[2], amount);
+      gridPositions.push(
+        ...transform([min[0], min[1], z]).toArray(),
+        ...transform([max[0], min[1], z]).toArray(),
+        ...transform([x, min[1], min[2]]).toArray(),
+        ...transform([x, min[1], max[2]]).toArray(),
+      );
+    }
+    const gridGeometry = new THREE.BufferGeometry();
+    gridGeometry.setAttribute("position", new THREE.Float32BufferAttribute(gridPositions, 3));
+    this.guideRoot.add(new THREE.LineSegments(
+      gridGeometry,
+      new THREE.LineBasicMaterial({ color: "#aeb9c7", transparent: true, opacity: 0.5 }),
+    ));
+
+    const origin = transform([min[0], min[1], min[2]]);
+    const axisPositions: number[] = [];
+    const axisColors: number[] = [];
+    const colors = [new THREE.Color("#ef4444"), new THREE.Color("#22c55e"), new THREE.Color("#3b82f6")];
+    for (let axis = 0; axis < 3; axis += 1) {
+      const endpointIndex: [number, number, number] = [min[0], min[1], min[2]];
+      endpointIndex[axis] = max[axis];
+      const endpoint = transform(endpointIndex);
+      if (endpoint.distanceToSquared(origin) <= Number.EPSILON) {
+        continue;
+      }
+      axisPositions.push(...origin.toArray(), ...endpoint.toArray());
+      const color = colors[axis];
+      axisColors.push(color.r, color.g, color.b, color.r, color.g, color.b);
+    }
+    if (axisPositions.length > 0) {
+      const axisGeometry = new THREE.BufferGeometry();
+      axisGeometry.setAttribute("position", new THREE.Float32BufferAttribute(axisPositions, 3));
+      axisGeometry.setAttribute("color", new THREE.Float32BufferAttribute(axisColors, 3));
+      this.guideRoot.add(new THREE.LineSegments(
+        axisGeometry,
+        new THREE.LineBasicMaterial({ vertexColors: true }),
+      ));
+    }
   }
 
   private addSlicePlane(): void {
@@ -446,6 +638,7 @@ class MeshSliceViewer {
     });
 
     this.folderInput.addEventListener("change", () => void this.loadSelectedPipelineFolder());
+    this.fieldInput.addEventListener("change", () => void this.loadSelectedFields());
     this.meshInput.addEventListener("change", () => void this.loadSelectedMeshFile());
     this.vxzInput.addEventListener("change", () => void this.loadSelectedVxz());
     window.voxelMeshViewer?.onOpenVxzRequest((request) => {
@@ -499,8 +692,37 @@ class MeshSliceViewer {
       }
     });
     this.arraySelect.addEventListener("change", () => void this.selectVolume(Number(this.arraySelect.value)));
+    this.fieldSemantic.addEventListener("change", () => this.applyFieldSettings("semantic"));
+    this.categoricalPreset.addEventListener("change", () => this.applyFieldSettings("categoricalPreset"));
+    this.fieldAssociation.addEventListener("change", () => this.applyFieldSettings("association"));
+    this.fieldAxisOrder.addEventListener("change", () => this.applyFieldSettings("axisOrder"));
+    this.fieldCoordinates.addEventListener("change", () => this.applyFieldSettings("coordinates"));
+    this.fieldIndexToWorld.addEventListener("change", () => this.applyFieldSettings("coordinates"));
+    this.continuousColorMap.addEventListener("change", () => this.applyFieldSettings("continuousPalette"));
+    this.continuousRangeMin.addEventListener("change", () => this.applyFieldSettings("continuousRange"));
+    this.continuousRangeMax.addEventListener("change", () => this.applyFieldSettings("continuousRange"));
+    this.continuousIsovalue.addEventListener("change", () => this.applyFieldSettings("continuousIsovalue"));
+    this.continuousContours.addEventListener("change", () => this.renderSlice());
     this.sliceRenderMode.addEventListener("change", () => {
       this.setInspector();
+      this.updateSlicePlane();
+      this.renderSlice();
+    });
+    this.labelSearch.addEventListener("input", () => {
+      const slot = this.activeVolumeSlot();
+      if (!slot) {
+        return;
+      }
+      slot.labelFilter = setLabelQuery(slot.labelFilter ?? createLabelFilterState(), this.labelSearch.value);
+      this.renderSlice();
+    });
+    this.showAllLabels.addEventListener("click", () => {
+      const slot = this.activeVolumeSlot();
+      if (!slot) {
+        return;
+      }
+      slot.labelFilter = createLabelFilterState();
+      this.labelSearch.value = "";
       this.renderSlice();
     });
 
@@ -581,7 +803,7 @@ class MeshSliceViewer {
         return;
       }
 
-      this.sliceAxis = axis;
+      this.viewerState = setActiveAxis(this.viewerState, axis);
       const buttons = Array.from(button.parentElement.querySelectorAll<HTMLButtonElement>("button"));
       for (const button of buttons) {
         button.classList.toggle("active", button.dataset.axis === axis);
@@ -592,7 +814,9 @@ class MeshSliceViewer {
     });
 
     this.sliceCanvas.addEventListener("pointermove", (event) => this.inspectSlicePointer(event));
-    this.sliceCanvas.addEventListener("pointerleave", () => this.setInspector());
+    this.sliceCanvas.addEventListener("click", (event) => this.pinSlicePointer(event));
+    this.sliceCanvas.addEventListener("pointerleave", () => this.showPinnedInspectorOrClear());
+    this.clearSelectedPoint.addEventListener("click", () => this.clearPinnedFieldPoint());
   }
 
   private async loadSelectedPipelineFolder(): Promise<void> {
@@ -610,16 +834,64 @@ class MeshSliceViewer {
     }
   }
 
-  private async loadPipelineFolder(files: SourceFile[], folderLabel?: string): Promise<void> {
+  private async loadSelectedFields(): Promise<void> {
+    const files = Array.from(this.fieldInput.files ?? []) as SourceFile[];
+    if (files.length === 0) {
+      return;
+    }
+
+    try {
+      await this.loadPipelineFolder(files, "selected fields", { replaceMeshes: false });
+    } catch (error) {
+      if (!isAbortError(error)) {
+        this.setStatus(errorMessage(error));
+      }
+    } finally {
+      this.fieldInput.value = "";
+    }
+  }
+
+  private claimSourceLoad(): number {
+    this.sourceLoadToken += 1;
+    this.volumeLoadToken += 1;
+    return this.sourceLoadToken;
+  }
+
+  private async loadPipelineFolder(
+    files: SourceFile[],
+    folderLabel?: string,
+    options: { replaceMeshes?: boolean; sourceToken?: number } = {},
+  ): Promise<boolean> {
+    const sourceToken = options.sourceToken ?? this.claimSourceLoad();
+    if (sourceToken !== this.sourceLoadToken) {
+      return false;
+    }
+    const replaceMeshes = options.replaceMeshes ?? true;
     this.clearVxzSource();
+    this.volumeSlots = [];
+    this.fieldManifest = undefined;
+    this.fieldManifestWarnings = [];
+    this.populateArraySelect();
+    this.arraySelect.disabled = true;
+    this.arraySelectRow.classList.add("hidden");
+    this.showNoSourceState();
+    if (replaceMeshes) {
+      this.clearGroup(this.meshRoot);
+      this.currentMeshFiles = [];
+      this.meshItems = [];
+      this.renderMeshList();
+    }
     const selection = findPipelineFolderSelection(files);
     const displayFolder = folderLabel || selection.directory || "(selected folder)";
     const statusFolder = compactFolderLabel(displayFolder);
     this.setStatus(`Loading ${statusFolder}`);
 
-    this.activeVolume = null;
-    this.volumeLoadToken += 1;
-    this.labelMetadataByFileName = await loadNpyLabelManifest(selection.manifest);
+    const fieldManifest = await loadFieldManifests(selection.manifests);
+    if (sourceToken !== this.sourceLoadToken) {
+      return false;
+    }
+    this.fieldManifest = fieldManifest;
+    this.fieldManifestWarnings = this.fieldManifest?.warnings ?? [];
     this.volumeSlots = selection.volumes.map((file) => ({
       name: file.name,
       file,
@@ -628,21 +900,33 @@ class MeshSliceViewer {
 
     const caseIndex = this.volumeSlots.findIndex((slot) => slot.name.toLowerCase().includes("cases"));
     this.arraySelect.value = String(caseIndex >= 0 ? caseIndex : 0);
-    if (selection.meshes.length > 0) {
-      await this.loadMeshFiles(selection.meshes, { replace: true });
-    } else {
-      this.clearGroup(this.meshRoot);
-      this.currentMeshFiles = [];
-      this.meshItems = [];
-      this.renderMeshList();
+    const fieldLoaded = await this.selectVolume(caseIndex >= 0 ? caseIndex : 0, true);
+    if (sourceToken === this.sourceLoadToken) {
+      this.arraySelect.disabled = false;
     }
-    await this.selectVolume(caseIndex >= 0 ? caseIndex : 0, true);
+    if (!fieldLoaded || sourceToken !== this.sourceLoadToken) {
+      return false;
+    }
+    if (selection.meshes.length > 0) {
+      await this.loadMeshFiles(selection.meshes, { replace: false, sourceToken });
+    }
+    if (sourceToken !== this.sourceLoadToken) {
+      return false;
+    }
     const meshText = selection.meshes.length > 0
-      ? ` and ${selection.meshes.length} mesh${selection.meshes.length === 1 ? "" : "es"}`
-      : " and no mesh";
+      ? `${replaceMeshes ? " and " : " and added "}${selection.meshes.length} mesh${selection.meshes.length === 1 ? "" : "es"}`
+      : replaceMeshes
+        ? " and no mesh"
+        : this.meshItems.length > 0
+          ? " with the current mesh overlay"
+          : "";
+    const metadataWarnings = this.fieldManifestWarnings.length
+      ? ` Metadata: ${this.fieldManifestWarnings.join(" ")}`
+      : "";
     this.setStatus(
-      `Loaded ${statusFolder}: ${selection.volumes.length} volume${selection.volumes.length === 1 ? "" : "s"}${meshText}`,
+      `Loaded ${statusFolder}: ${selection.volumes.length} field${selection.volumes.length === 1 ? "" : "s"}${meshText}.${metadataWarnings}`,
     );
+    return true;
   }
 
   private async initializeRemoteBrowser(): Promise<void> {
@@ -708,6 +992,7 @@ class MeshSliceViewer {
       return;
     }
 
+    const sourceToken = this.claimSourceLoad();
     this.setRemoteStatus(`Loading folder ${path}`);
 
     try {
@@ -716,6 +1001,10 @@ class MeshSliceViewer {
         path === this.remotePath && host === this.remoteHost
           ? { host: this.remoteHost, path: this.remotePath, parent: this.remoteParent, entries: this.remoteEntries }
           : await fetchRemoteJson<RemoteListResponse>("list", host, { path });
+
+      if (sourceToken !== this.sourceLoadToken) {
+        return;
+      }
 
       this.remoteHost = response.host;
       this.remotePath = response.path;
@@ -729,10 +1018,17 @@ class MeshSliceViewer {
 
       const files = this.remoteSourceFiles(response.entries, response.path, response.host);
 
-      await this.loadPipelineFolder(files, `${response.host}:${response.path}`);
-      this.setRemoteStatus(`Loaded ${response.host}:${response.path}`);
+      const loaded = await this.loadPipelineFolder(files, `${response.host}:${response.path}`, { sourceToken });
+      if (sourceToken !== this.sourceLoadToken) {
+        return;
+      }
+      this.setRemoteStatus(
+        loaded
+          ? `Loaded ${response.host}:${response.path}`
+          : this.statusText.textContent || `Could not load ${response.host}:${response.path}`,
+      );
     } catch (error) {
-      if (!isAbortError(error)) {
+      if (sourceToken === this.sourceLoadToken && !isAbortError(error)) {
         this.setStatus(errorMessage(error));
         this.setRemoteStatus(errorMessage(error));
       }
@@ -764,7 +1060,7 @@ class MeshSliceViewer {
           : await fetchRemoteJson<RemoteListResponse>("list", host, { path });
 
       const selection = findPipelineFolderSelection(this.remoteSourceFiles(response.entries, response.path, response.host));
-      const files = [...selection.volumes, ...selection.meshes];
+      const files = [...selection.volumes, ...selection.meshes, ...selection.manifests];
       const folderLabel = compactFolderLabel(`${response.host}:${response.path}`);
       let succeeded = 0;
       let failed = 0;
@@ -1075,7 +1371,7 @@ class MeshSliceViewer {
       const option = document.createElement("option");
       option.value = String(index);
       option.textContent = slot.volume
-        ? `${slot.name} (${slot.volume.shape.join(" x ")})`
+        ? `${slot.name} (${slot.volume.definition.logicalShape.join(" x ")})`
         : `${slot.name} (load/cache on select)`;
       this.arraySelect.append(option);
     });
@@ -1090,63 +1386,95 @@ class MeshSliceViewer {
     this.arraySelectRow.classList.toggle("hidden", this.volumeSlots.length <= 1);
   }
 
-  private async selectVolume(index: number, resetSlice = false): Promise<void> {
+  private async selectVolume(index: number, resetSlice = false): Promise<boolean> {
     const slot = this.volumeSlots[index];
     if (!slot) {
-      return;
+      return false;
     }
 
     const token = ++this.volumeLoadToken;
     let loadTaskId: number | null = null;
+    const assertCurrentVolumeLoad = (): void => {
+      if (token !== this.volumeLoadToken) {
+        throw new DOMException("Superseded field load", "AbortError");
+      }
+    };
 
     try {
       this.releaseDeferredVolumesExcept(index);
 
       if (!slot.volume) {
         if (!slot.file) {
-          throw new Error(`Volume ${slot.name} is not available.`);
+          throw new Error(`Field ${slot.name} is not available.`);
         }
 
-        this.activeVolume = null;
+        this.showNoSourceState(true);
         loadTaskId = this.beginFileLoad(`Loading ${slot.file.name}`);
         this.setStatus(`Loading ${slot.file.name}`);
         await yieldToBrowser();
+        assertCurrentVolumeLoad();
         const buffer = await slot.file.arrayBuffer((progress) => {
-          if (loadTaskId !== null) {
+          if (loadTaskId !== null && token === this.volumeLoadToken) {
             this.setLoadProgress(loadTaskId, `Downloading ${slot.file?.name ?? slot.name}`, progress);
           }
         });
+        assertCurrentVolumeLoad();
         this.setLoadProgress(loadTaskId, `Parsing ${slot.file.name}`, {
           loaded: buffer.byteLength,
           total: buffer.byteLength,
         });
         await yieldToBrowser();
-        const volume = parseNpy(buffer, slot.file.name);
-        volume.labelMetadata = this.labelMetadataByFileName.get(baseFileName(slot.file.name));
+        assertCurrentVolumeLoad();
+        const array = parseNpy(buffer, slot.file.name);
+        const preset = inferPipelinePreset(slot.file.name);
+        const definition = resolveFieldDefinition(array, {
+          preset,
+          manifest: this.fieldManifest,
+          userOverrides: slot.userOverrides,
+        });
+        const volume: DenseField = { array, definition };
         slot.volume = volume;
-        slot.name = volume.name;
+        slot.provider = new InMemoryFieldProvider(volume);
+        slot.labelFilter ??= initialLabelFilterState(definition.labels);
+        slot.name = array.name;
         this.populateArraySelect();
-        this.finishLoadProgress(loadTaskId, `Loaded ${volume.name}`);
+        this.finishLoadProgress(loadTaskId, `Loaded ${array.name}`);
         loadTaskId = null;
         await yieldToBrowser();
       }
 
       if (token !== this.volumeLoadToken) {
-        return;
+        return false;
       }
 
       this.activeVolume = slot.volume;
+      slot.labelFilter ??= initialLabelFilterState(slot.volume.definition.labels);
+      this.activeProvider = slot.provider ?? new InMemoryFieldProvider(slot.volume);
+      slot.provider = this.activeProvider;
+      this.activeFieldSlice = null;
       this.arraySelect.value = String(index);
       this.populateArraySelect();
       this.arraySelect.value = String(index);
       this.updateSliceControls(resetSlice);
+      this.updateFieldOptions();
+      this.rebuildSceneGuides();
       this.updateSlicePlane();
+      this.updateSelectionMarker();
       this.renderSlice();
-      const warnings = slot.volume.warnings.length ? ` ${slot.volume.warnings.join(" ")}` : "";
-      this.setStatus(`Volume ${slot.volume.name}: ${slot.volume.shape.join(" x ")} ${slot.volume.dtype}.${warnings}`);
+      this.showPinnedInspectorOrClear();
+      if (resetSlice) {
+        this.resetCamera();
+      }
+      const warnings = [...slot.volume.array.warnings, ...this.fieldManifestWarnings];
+      const warningText = warnings.length ? ` ${warnings.join(" ")}` : "";
+      this.setStatus(
+        `Field ${slot.volume.definition.name}: ${slot.volume.definition.logicalShape.join(" x ")} `
+        + `${slot.volume.array.dtype}, ${slot.volume.definition.semantic}.${warningText}`,
+      );
+      return true;
     } catch (error) {
       if (isAbortError(error)) {
-        return;
+        return false;
       }
 
       if (loadTaskId !== null) {
@@ -1155,8 +1483,12 @@ class MeshSliceViewer {
       }
 
       if (token === this.volumeLoadToken) {
-        this.setStatus(errorMessage(error));
+        const metadataWarnings = this.fieldManifestWarnings.length
+          ? ` Metadata: ${this.fieldManifestWarnings.join(" ")}`
+          : "";
+        this.setStatus(`${errorMessage(error)}${metadataWarnings}`);
       }
+      return false;
     } finally {
       if (loadTaskId !== null) {
         this.removeLoadProgress(loadTaskId);
@@ -1168,8 +1500,169 @@ class MeshSliceViewer {
     for (let slotIndex = 0; slotIndex < this.volumeSlots.length; slotIndex += 1) {
       if (slotIndex !== index && this.volumeSlots[slotIndex].file) {
         this.volumeSlots[slotIndex].volume = undefined;
+        this.volumeSlots[slotIndex].provider = undefined;
       }
     }
+  }
+
+  private activeVolumeSlot(): VolumeSlot | undefined {
+    const index = Number(this.arraySelect.value);
+    return Number.isInteger(index) ? this.volumeSlots[index] : undefined;
+  }
+
+  private updateFieldOptions(): void {
+    const field = this.activeVolume;
+    if (!field) {
+      this.fieldOptions.classList.add("hidden");
+      this.labelTools.classList.add("hidden");
+      return;
+    }
+
+    const definition = field.definition;
+    this.fieldOptions.classList.remove("hidden");
+    this.fieldSemantic.value = definition.semantic;
+    this.categoricalPreset.value = definition.categoricalPreset;
+    this.fieldAssociation.value = definition.association;
+    this.fieldAxisOrder.value = definition.sourceAxisOrder.join("");
+    this.fieldCoordinates.value = definition.coordinatePreset === "normalized"
+      ? "normalized"
+      : definition.coordinatePreset === "index"
+        ? "index"
+        : "custom";
+    this.fieldMatrixControl.classList.toggle("hidden", this.fieldCoordinates.value !== "custom");
+    this.fieldIndexToWorld.value = formatIndexToWorldText(definition.indexToWorld);
+    this.categoricalPresetControl.classList.toggle("hidden", definition.semantic !== "categorical");
+    this.continuousOptions.classList.toggle("hidden", definition.semantic !== "continuous");
+    this.labelTools.classList.toggle("hidden", definition.semantic !== "categorical");
+    this.labelSearch.value = this.activeVolumeSlot()?.labelFilter?.query ?? "";
+
+    if (definition.semantic === "continuous") {
+      const range = definition.continuousStyle.range;
+      this.continuousRangeMin.value = range ? String(range[0]) : "";
+      this.continuousRangeMax.value = range ? String(range[1]) : "";
+      this.continuousIsovalue.value = String(definition.continuousStyle.isovalue ?? definition.continuousStyle.center ?? 0);
+      this.continuousColorMap.value = definition.stylePreset === "scalarField"
+        ? "sdf"
+        : ["sdf", "diverging", "viridis", "grayscale"].includes(definition.stylePreset ?? "")
+          ? definition.stylePreset!
+          : "diverging";
+    }
+
+    const coordinateText = definition.coordinatePreset === "normalized"
+      ? `normalized ${definition.association} coordinates`
+      : definition.coordinatePreset === "index"
+        ? "index coordinates"
+        : "custom index-to-world transform";
+    const semanticSource = definition.semanticSource === "dtype" ? "dtype suggestion" : definition.semanticSource;
+    const coordinateSource = definition.coordinateSource === "index" ? "default" : definition.coordinateSource;
+    const labelCount = Object.keys(definition.labels).length;
+    this.fieldMetadataSummary.textContent = [
+      `${capitalize(definition.semantic)} (${semanticSource})`,
+      definition.logicalShape.join(" × "),
+      `${definition.sourceAxisOrder.join("").toUpperCase()} source axes`,
+      `${definition.association} samples`,
+      `${coordinateText} (${coordinateSource})`,
+      definition.semantic === "categorical" && labelCount > 0 ? `${labelCount} named labels` : "exact values",
+      definition.validity.noDataValues?.length
+        ? `${definition.validity.noDataValues.length} no-data value${definition.validity.noDataValues.length === 1 ? "" : "s"}`
+        : "",
+      definition.sparseDefault !== undefined ? `sparse default ${definition.sparseDefault}` : "",
+    ].filter(Boolean).join(" · ");
+  }
+
+  private applyFieldSettings(kind: FieldSettingKind): void {
+    const field = this.activeVolume;
+    const slotIndex = Number(this.arraySelect.value);
+    const slot = this.volumeSlots[slotIndex];
+    if (!field || !slot) {
+      return;
+    }
+
+    const overrides: FieldMetadataPatch = { ...slot.userOverrides };
+    if (kind === "semantic") {
+      overrides.semantic = this.fieldSemantic.value === "continuous" ? "continuous" : "categorical";
+    } else if (kind === "categoricalPreset") {
+      overrides.categoricalPreset = this.categoricalPreset.value === "instances" ? "instances" : "semantic";
+    } else if (kind === "association") {
+      overrides.association = this.fieldAssociation.value === "cell" ? "cell" : "point";
+    } else if (kind === "axisOrder") {
+      overrides.sourceAxisOrder = this.fieldAxisOrder.value.split("") as unknown as SourceAxisOrder;
+    } else if (kind === "coordinates") {
+      if (this.fieldCoordinates.value === "index") {
+        overrides.coordinatePreset = "index";
+        delete overrides.indexToWorld;
+      } else if (this.fieldCoordinates.value === "normalized") {
+        overrides.coordinatePreset = "normalized";
+        delete overrides.indexToWorld;
+      } else {
+        try {
+          overrides.indexToWorld = parseIndexToWorldText(this.fieldIndexToWorld.value);
+          delete overrides.coordinatePreset;
+        } catch (error) {
+          this.setStatus(errorMessage(error));
+          return;
+        }
+      }
+    } else if (kind === "continuousRange") {
+      const minimum = optionalFiniteNumber(this.continuousRangeMin.value);
+      const maximum = optionalFiniteNumber(this.continuousRangeMax.value);
+      if ((minimum === null) !== (maximum === null)) {
+        this.setStatus("Enter both range limits, or clear both fields to use the field's default display range.");
+        return;
+      }
+      if (minimum !== null && maximum !== null && minimum >= maximum) {
+        this.setStatus("Continuous range minimum must be smaller than the maximum.");
+        return;
+      }
+      overrides.continuousStyle = {
+        ...overrides.continuousStyle,
+        range: minimum !== null && maximum !== null ? [minimum, maximum] as const : null,
+      };
+    } else if (kind === "continuousIsovalue") {
+      const isovalue = optionalFiniteNumber(this.continuousIsovalue.value);
+      if (isovalue === null) {
+        this.setStatus("Enter a finite isovalue.");
+        return;
+      }
+      overrides.continuousStyle = {
+        ...overrides.continuousStyle,
+        isovalue,
+      };
+    } else {
+      overrides.continuousStyle = {
+        ...overrides.continuousStyle,
+        ...continuousPalette(this.continuousColorMap.value),
+      };
+      overrides.stylePreset = this.continuousColorMap.value;
+    }
+
+    slot.userOverrides = overrides;
+    const preset = inferPipelinePreset(field.array.name);
+    const definition = resolveFieldDefinition(field.array, {
+      preset,
+      manifest: this.fieldManifest,
+      userOverrides: overrides,
+    });
+    const updated: DenseField = { array: field.array, definition };
+    slot.volume = updated;
+    slot.provider = new InMemoryFieldProvider(updated);
+    if (kind === "semantic" || kind === "categoricalPreset") {
+      slot.labelFilter = initialLabelFilterState(definition.labels);
+    }
+    this.activeVolume = updated;
+    this.activeProvider = slot.provider;
+    this.activeFieldSlice = null;
+    this.viewerState = reconcileViewerState(this.viewerState, definition.logicalShape);
+    this.updateFieldOptions();
+    this.rebuildSceneGuides();
+    this.updateSliceControls(false);
+    this.updateSlicePlane();
+    this.updateSelectionMarker();
+    if (kind === "association" || kind === "axisOrder" || kind === "coordinates") {
+      this.resetCamera();
+    }
+    this.renderSlice();
+    this.showPinnedInspectorOrClear();
   }
 
   private async loadSelectedVxz(): Promise<void> {
@@ -1209,20 +1702,31 @@ class MeshSliceViewer {
     });
   }
 
-  private async loadOpenedVxz(sourceName: string, job: VxzJobResponse): Promise<void> {
-    await this.loadVxzSource(sourceName, `Opening VXZ ${sourceName}`, async () => job);
+  private async loadOpenedVxz(
+    sourceName: string,
+    job: VxzJobResponse,
+    sourceToken?: number,
+  ): Promise<void> {
+    await this.loadVxzSource(sourceName, `Opening VXZ ${sourceName}`, async () => job, sourceToken);
   }
 
   private async openAssociatedVxz(request: ElectronVxzOpenRequest): Promise<void> {
+    const sourceToken = this.claimSourceLoad();
     const bridge = window.voxelMeshViewer;
     if (!bridge) {
       throw new Error("Electron VXZ bridge is unavailable");
     }
     const resolution = this.requestedVxzResolution();
     await this.persistVxzResolution();
+    if (sourceToken !== this.sourceLoadToken) {
+      throw new DOMException("Superseded VXZ load", "AbortError");
+    }
     this.setStatus(`Opening VXZ ${request.sourceName}`);
     const job = await bridge.openVxzFile(request.requestId, resolution);
-    await this.loadOpenedVxz(request.sourceName, job);
+    if (sourceToken !== this.sourceLoadToken) {
+      throw new DOMException("Superseded VXZ load", "AbortError");
+    }
+    await this.loadOpenedVxz(request.sourceName, job, sourceToken);
   }
 
   private async initializeElectronFileBridge(): Promise<void> {
@@ -1254,13 +1758,20 @@ class MeshSliceViewer {
     sourceName: string,
     initialMessage: string,
     openJob: (signal: AbortSignal) => Promise<VxzJobResponse>,
+    requestedSourceToken?: number,
   ): Promise<void> {
+    const sourceToken = requestedSourceToken ?? this.claimSourceLoad();
+    if (sourceToken !== this.sourceLoadToken) {
+      throw new DOMException("Superseded VXZ load", "AbortError");
+    }
     this.clearVxzSource();
-    this.activeVolume = null;
-    this.volumeLoadToken += 1;
     this.volumeSlots = [];
-    this.labelMetadataByFileName.clear();
+    this.fieldManifest = undefined;
+    this.fieldManifestWarnings = [];
+    this.fieldOptions.classList.add("hidden");
+    this.labelTools.classList.add("hidden");
     this.arraySelectRow.classList.add("hidden");
+    this.showNoSourceState();
     const token = ++this.vxzLoadToken;
     const controller = new AbortController();
     this.vxzLoadAbort = controller;
@@ -1269,10 +1780,13 @@ class MeshSliceViewer {
 
     try {
       let job = await openJob(controller.signal);
+      if (sourceToken !== this.sourceLoadToken) {
+        throw new DOMException("Superseded VXZ load", "AbortError");
+      }
       this.assertVxzJob(job);
 
       while (job.status === "processing") {
-        if (token !== this.vxzLoadToken) {
+        if (token !== this.vxzLoadToken || sourceToken !== this.sourceLoadToken) {
           throw new DOMException("Superseded VXZ load", "AbortError");
         }
         const progress = Number.isFinite(job.progress) ? clamp(job.progress, 0, 1) : 0;
@@ -1298,7 +1812,7 @@ class MeshSliceViewer {
       if (job.status === "failed" || !job.metadata) {
         throw new Error(job.error || job.message || "VXZ decode failed");
       }
-      if (token !== this.vxzLoadToken) {
+      if (token !== this.vxzLoadToken || sourceToken !== this.sourceLoadToken) {
         throw new DOMException("Superseded VXZ load", "AbortError");
       }
 
@@ -1337,7 +1851,7 @@ class MeshSliceViewer {
         throw new Error(await responseError(voxelResponse));
       }
       const voxelBuffer = await voxelResponse.arrayBuffer();
-      if (token !== this.vxzLoadToken) {
+      if (token !== this.vxzLoadToken || sourceToken !== this.sourceLoadToken) {
         throw new DOMException("Superseded VXZ load", "AbortError");
       }
       this.loadVxzVoxelPreview(voxelBuffer);
@@ -1362,7 +1876,7 @@ class MeshSliceViewer {
         throw new Error(await responseError(meshResponse));
       }
       const meshBuffer = await meshResponse.arrayBuffer();
-      if (token !== this.vxzLoadToken) {
+      if (token !== this.vxzLoadToken || sourceToken !== this.sourceLoadToken) {
         throw new DOMException("Superseded VXZ load", "AbortError");
       }
       this.loadDecodedVxzMesh(meshBuffer, sourceName);
@@ -1690,6 +2204,7 @@ class MeshSliceViewer {
       replace: boolean;
       visibility?: boolean[];
       normalizeToCurrentSize?: boolean;
+      sourceToken?: number;
     },
   ): Promise<void> {
     const filesToLoad = [...files];
@@ -1703,6 +2218,13 @@ class MeshSliceViewer {
     const normalizationTargetLabel = preferredNormalizationBounds ? "VXZ size" : "current size";
     let normalizedCount = 0;
 
+    const assertCurrentSource = (): void => {
+      if (options.sourceToken !== undefined && options.sourceToken !== this.sourceLoadToken) {
+        throw new DOMException("Superseded field-folder load", "AbortError");
+      }
+    };
+    assertCurrentSource();
+
     if (options.replace) {
       this.clearGroup(this.meshRoot);
       this.currentMeshFiles = [];
@@ -1711,6 +2233,7 @@ class MeshSliceViewer {
     }
 
     for (const [index, file] of filesToLoad.entries()) {
+      assertCurrentSource();
       let loadTaskId: number | null = this.beginFileLoad(`Loading mesh ${file.name}`);
       this.setStatus(`Loading mesh ${file.name}`);
       let object: THREE.Object3D;
@@ -1720,6 +2243,12 @@ class MeshSliceViewer {
             this.setLoadProgress(loadTaskId, `Downloading mesh ${file.name}`, progress);
           }
         });
+        try {
+          assertCurrentSource();
+        } catch (error) {
+          disposeObject(object);
+          throw error;
+        }
         if (loadTaskId !== null) {
           this.finishLoadProgress(loadTaskId, `Loaded mesh ${file.name}`);
           loadTaskId = null;
@@ -1752,6 +2281,7 @@ class MeshSliceViewer {
       this.nextMeshId += 1;
       this.renderMeshList();
       await yieldToBrowser();
+      assertCurrentSource();
     }
 
     const loadedCount = filesToLoad.length;
@@ -1766,6 +2296,7 @@ class MeshSliceViewer {
             ? `; normalization skipped, invalid mesh or ${normalizationTargetLabel} bounds`
             : "; current size unavailable, kept source size"
       : "";
+    assertCurrentSource();
     this.setStatus(
       loadedCount === totalCount
         ? `Loaded ${totalCount} mesh${totalCount === 1 ? "" : "es"}${normalizationNote}${clippingNote}`
@@ -2009,9 +2540,33 @@ class MeshSliceViewer {
     this.slicePlaneMaterial.needsUpdate = true;
   }
 
+  private showNoSourceState(preserveViewerState = false): void {
+    const previousViewerState = preserveViewerState ? this.viewerState : null;
+    this.activeVolume = null;
+    this.activeProvider = null;
+    this.activeFieldSlice = null;
+    this.fieldSliceAbort?.abort();
+    this.fieldSliceAbort = null;
+    this.fieldSliceToken += 1;
+    this.fieldOptions.classList.add("hidden");
+    this.labelTools.classList.add("hidden");
+    this.selectionMarker.visible = false;
+    this.clearSelectedPoint.classList.add("hidden");
+    this.updateSliceControls(false);
+    this.rebuildSceneGuides();
+    this.updateSlicePlane();
+    this.renderSlice();
+    if (previousViewerState) {
+      this.viewerState = previousViewerState;
+    }
+  }
+
   private updateSliceControls(resetValue = false): void {
     const hasSource = this.hasSliceSource();
     const dims = hasSource ? this.getWorldDims() : [1, 1, 1] as [number, number, number];
+    this.viewerState = resetValue
+      ? createViewerState(dims, this.sliceAxis)
+      : reconcileViewerState(this.viewerState, dims);
     const axisIndex = axisToIndex(this.sliceAxis);
     const max = dims[axisIndex] - 1;
 
@@ -2025,29 +2580,35 @@ class MeshSliceViewer {
       this.sliceSlider.value = "0";
       this.sliceValue.value = "";
       this.sliceValue.placeholder = "No slice";
-      this.sliceIndex = 0;
+      this.clearSelectedPoint.classList.add("hidden");
+      this.viewerState = createViewerState([1, 1, 1], this.sliceAxis);
       return;
     }
 
     this.sliceValue.placeholder = "";
 
-    if (resetValue) {
-      this.sliceIndex = Math.floor(max / 2);
-    } else {
-      this.sliceIndex = clamp(this.sliceIndex, 0, max);
-    }
-
     this.sliceSlider.value = String(this.sliceIndex);
     this.sliceValue.value = String(this.sliceIndex);
+    this.clearSelectedPoint.classList.toggle("hidden", this.viewerState.pinnedGridPoint === null || !this.activeVolume);
   }
 
   private setSliceIndex(index: number): void {
-    const max = this.hasSliceSource() ? this.getWorldDims()[axisToIndex(this.sliceAxis)] - 1 : 0;
-    this.sliceIndex = clamp(Math.round(index), 0, max);
+    const dims = this.hasSliceSource() ? this.getWorldDims() : [1, 1, 1] as [number, number, number];
+    this.viewerState = updateViewerSliceIndex(this.viewerState, this.sliceAxis, index, dims);
     this.sliceSlider.value = String(this.sliceIndex);
     this.sliceValue.value = String(this.sliceIndex);
     this.updateSlicePlane();
+    this.updateSelectionMarker();
     this.renderSlice();
+    this.showPinnedInspectorOrClear();
+  }
+
+  private get sliceAxis(): SliceAxis {
+    return this.viewerState.activeAxis;
+  }
+
+  private get sliceIndex(): number {
+    return activeSliceIndex(this.viewerState);
   }
 
   private commitSliceInput(): void {
@@ -2065,12 +2626,44 @@ class MeshSliceViewer {
   }
 
   private updateSlicePlane(): void {
+    if (this.activeVolume && !this.vxzMetadata) {
+      const definition = this.activeVolume.definition;
+      const displayAssociation = definition.association === "cell"
+        && (this.sliceRenderMode.value as SliceRenderMode) === "cornerDots"
+        ? "point"
+        : definition.association;
+      const frame = computeTransformedSlicePlaneFrame(
+        definition.logicalShape,
+        displayAssociation,
+        definition.indexToWorld,
+        this.sliceAxis,
+        this.sliceIndex,
+      );
+      const center = vectorFromWorldPoint(frame.center);
+      const basisU = vectorFromWorldPoint(frame.basisU);
+      const basisV = vectorFromWorldPoint(frame.basisV);
+      const normal = vectorFromWorldPoint(frame.normal);
+
+      this.sliceRoot.matrixAutoUpdate = false;
+      this.sliceRoot.matrix.set(
+        basisU.x, basisV.x, normal.x, center.x,
+        basisU.y, basisV.y, normal.y, center.y,
+        basisU.z, basisV.z, normal.z, center.z,
+        0, 0, 0, 1,
+      );
+      this.sliceRoot.matrixWorldNeedsUpdate = true;
+      this.meshClipPlane.setFromNormalAndCoplanarPoint(normal, center);
+      this.refreshMeshClipping();
+      return;
+    }
+
     const dims = this.hasSliceSource() ? this.getWorldDims() : [1, 1, 1] as [number, number, number];
     const position = this.activeIndexToWorld(
       this.sliceIndex,
       dims[axisToIndex(this.sliceAxis)],
     );
 
+    this.sliceRoot.matrixAutoUpdate = true;
     this.sliceRoot.position.set(0, 0, 0);
     this.sliceRoot.rotation.set(0, 0, 0);
     const extentScale = this.vxzMetadata ? 0.5 : 1;
@@ -2091,13 +2684,7 @@ class MeshSliceViewer {
 
   private updateMeshClipping(position = 0): void {
     if (!this.hasSliceSource()) {
-      this.meshRoot.traverse((child) => {
-        if (isMesh(child) && isMeshMaterial(child.material)) {
-          this.setMaterialClipping(child.material);
-        } else if (isLineSegments(child) && isLineMaterial(child.material)) {
-          this.setMaterialClipping(child.material);
-        }
-      });
+      this.refreshMeshClipping();
       return;
     }
 
@@ -2110,6 +2697,10 @@ class MeshSliceViewer {
     }
     this.meshClipPlane.constant = position;
 
+    this.refreshMeshClipping();
+  }
+
+  private refreshMeshClipping(): void {
     this.meshRoot.traverse((child) => {
       if (isMesh(child) && isMeshMaterial(child.material)) {
         this.setMaterialClipping(child.material);
@@ -2132,37 +2723,67 @@ class MeshSliceViewer {
       void this.renderVxzSlice();
       return;
     }
+    void this.renderFieldSlice();
+  }
+
+  private async renderFieldSlice(): Promise<void> {
     const volume = this.activeVolume;
-    if (!volume) {
-      this.clearSliceCanvas("Load a volume to see slice colors");
+    const provider = this.activeProvider;
+    if (!volume || !provider) {
+      this.labelTools.classList.add("hidden");
+      this.clearSliceCanvas("Load a field to inspect exact slices");
       this.workspace.classList.add("single-pane");
       this.slicePane?.classList.add("empty-state");
-      this.renderStats.textContent = "No volume loaded";
+      this.renderStats.textContent = "No field loaded";
       this.renderLegend(new Map());
       this.setSlicePlaneTextureEnabled(false);
       this.setInspector();
       return;
     }
 
+    const token = ++this.fieldSliceToken;
+    this.fieldSliceAbort?.abort();
     const started = performance.now();
+    let fieldSlice = this.activeFieldSlice;
+    if (!fieldSlice || fieldSlice.axis !== this.sliceAxis || fieldSlice.index !== this.sliceIndex) {
+      const controller = new AbortController();
+      this.fieldSliceAbort = controller;
+      try {
+        fieldSlice = await provider.readSlice(
+          { axis: this.sliceAxis, index: this.sliceIndex },
+          controller.signal,
+        );
+      } catch (error) {
+        if (!isAbortError(error) && token === this.fieldSliceToken) {
+          this.renderStats.textContent = `Field slice error: ${errorMessage(error)}`;
+        }
+        return;
+      } finally {
+        if (this.fieldSliceAbort === controller) {
+          this.fieldSliceAbort = null;
+        }
+      }
+    }
+    if (token !== this.fieldSliceToken || provider !== this.activeProvider) {
+      return;
+    }
+    this.activeFieldSlice = fieldSlice;
+
     this.sliceCanvas.classList.remove("vxz-grid-mode");
     this.sliceCanvas.parentElement?.classList.remove("vxz-grid-mode");
-    const dims = this.getWorldDims();
-    const [width, height] = this.sliceAxis === "x"
-      ? [dims[2], dims[1]]
-      : this.sliceAxis === "y"
-        ? [dims[0], dims[2]]
-        : [dims[0], dims[1]];
-    const counts = new Map<CategoryKey, number>();
-    const labelCounts = new Map<number, number>();
+    const [width, height] = fieldSlice.shape;
+    const labelCounts = new Map<string, { value: FieldValue; count: number }>();
+    let noDataCount = 0;
     const renderMode = this.sliceRenderMode.value as SliceRenderMode;
     const cornerDotMode = renderMode === "cornerDots";
     const compactImage = this.sliceContext.createImageData(width, height);
+    const sampleVisibility = new Uint8Array(width * height);
 
     for (let py = 0; py < height; py += 1) {
       for (let px = 0; px < width; px += 1) {
         const sample = this.sampleSlicePixel(px, py, height);
         const display = this.getSampleDisplay(sample);
+        sampleVisibility[py * width + px] = display.visible ? 1 : 0;
         const [r, g, b] = display.color;
         const offset = (py * width + px) * 4;
         compactImage.data[offset] = r;
@@ -2170,12 +2791,12 @@ class MeshSliceViewer {
         compactImage.data[offset + 2] = b;
         compactImage.data[offset + 3] = 255;
 
-        if (display.category) {
-          counts.set(display.category, (counts.get(display.category) ?? 0) + 1);
-        }
-        if (volume.visualization === "linfinityDistanceCases" && Number.isFinite(sample.label)) {
-          const label = Math.trunc(sample.label);
-          labelCounts.set(label, (labelCounts.get(label) ?? 0) + 1);
+        if (isNoDataValue(sample.value, volume.definition.validity)) {
+          noDataCount += 1;
+        } else if (volume.definition.semantic === "categorical") {
+          const key = fieldValueKey(sample.value);
+          const current = labelCounts.get(key);
+          labelCounts.set(key, { value: sample.value, count: (current?.count ?? 0) + 1 });
         }
       }
     }
@@ -2192,6 +2813,9 @@ class MeshSliceViewer {
 
       for (let py = 0; py < height; py += 1) {
         for (let px = 0; px < width; px += 1) {
+          if (sampleVisibility[py * width + px] === 0) {
+            continue;
+          }
           const compactOffset = (py * width + px) * 4;
           const r = compactImage.data[compactOffset];
           const g = compactImage.data[compactOffset + 1];
@@ -2225,7 +2849,14 @@ class MeshSliceViewer {
       this.sliceTextureCanvas.width = width;
       this.sliceTextureCanvas.height = height;
       this.sliceTextureContext.imageSmoothingEnabled = false;
-      this.sliceTextureContext.putImageData(compactImage, 0, 0);
+      const textureImage = this.sliceTextureContext.createImageData(width, height);
+      textureImage.data.set(compactImage.data);
+      for (let sampleIndex = 0; sampleIndex < sampleVisibility.length; sampleIndex += 1) {
+        if (sampleVisibility[sampleIndex] === 0) {
+          textureImage.data[sampleIndex * 4 + 3] = 0;
+        }
+      }
+      this.sliceTextureContext.putImageData(textureImage, 0, 0);
       this.sliceTexture.magFilter = THREE.NearestFilter;
       this.sliceTexture.minFilter = THREE.NearestFilter;
     }
@@ -2272,13 +2903,17 @@ class MeshSliceViewer {
       this.sliceCanvas.height = canvasHeight;
       this.sliceContext.imageSmoothingEnabled = true;
       this.sliceContext.putImageData(image, 0, 0);
-      this.renderStats.textContent = `${this.sliceAxis.toUpperCase()}=${this.sliceIndex}, ${width} x ${height} points, ${canvasWidth} x ${canvasHeight}, ${(performance.now() - started).toFixed(1)} ms`;
+      this.drawContinuousContours(cornerDotMode);
+      this.drawPinnedCrosshair(cornerDotMode);
+      this.renderStats.textContent = `${this.sliceAxis.toUpperCase()}=${this.sliceIndex}, ${width} x ${height} points, ${canvasWidth} x ${canvasHeight}${noDataCount ? `, ${noDataCount.toLocaleString()} no data` : ""}, ${(performance.now() - started).toFixed(1)} ms`;
     } else {
       this.sliceCanvas.width = width;
       this.sliceCanvas.height = height;
       this.sliceContext.imageSmoothingEnabled = false;
       this.sliceContext.putImageData(compactImage, 0, 0);
-      this.renderStats.textContent = `${this.sliceAxis.toUpperCase()}=${this.sliceIndex}, ${width} x ${height}, ${(performance.now() - started).toFixed(1)} ms`;
+      this.drawContinuousContours(cornerDotMode);
+      this.drawPinnedCrosshair(cornerDotMode);
+      this.renderStats.textContent = `${this.sliceAxis.toUpperCase()}=${this.sliceIndex}, ${width} x ${height}${noDataCount ? `, ${noDataCount.toLocaleString()} no data` : ""}, ${(performance.now() - started).toFixed(1)} ms`;
     }
 
     this.sliceCanvas.classList.toggle("corner-dot-mode", cornerDotMode);
@@ -2297,7 +2932,7 @@ class MeshSliceViewer {
     this.setSlicePlaneTextureEnabled(true);
     this.updateSlicePlaneOpacity();
     this.sliceTexture.needsUpdate = true;
-    this.renderLegend(counts, labelCounts);
+    this.renderLegend(labelCounts, noDataCount);
   }
 
   private async renderVxzSlice(): Promise<void> {
@@ -2309,6 +2944,13 @@ class MeshSliceViewer {
     this.clearVxzDualVertices();
     const token = ++this.vxzSliceToken;
     this.vxzSliceAbort?.abort();
+    this.vxzSliceRecords.clear();
+    this.setSlicePlaneTextureEnabled(false);
+    this.clearSliceCanvas(`Loading exact ${this.sliceAxis.toUpperCase()}=${this.sliceIndex} VXZ slice`);
+    this.workspace.classList.remove("single-pane");
+    this.renderStats.textContent = `Loading ${this.sliceAxis.toUpperCase()}=${this.sliceIndex}`;
+    this.legendList.replaceChildren();
+    this.setInspector();
     const controller = new AbortController();
     this.vxzSliceAbort = controller;
     const started = performance.now();
@@ -2351,7 +2993,6 @@ class MeshSliceViewer {
         image.data[offset + 2] = 250;
         image.data[offset + 3] = 255;
       }
-      this.vxzSliceRecords.clear();
       const colorMode = this.vxzColorMode.value as VxzColorMode;
       const fallbackCounts = [0, 0, 0, 0];
       const qefRankCounts = [0, 0, 0, 0];
@@ -2454,6 +3095,8 @@ class MeshSliceViewer {
     } catch (error) {
       if (!isAbortError(error) && token === this.vxzSliceToken) {
         this.renderStats.textContent = `VXZ slice error: ${errorMessage(error)}`;
+        this.clearSliceCanvas("Exact VXZ slice unavailable");
+        this.workspace.classList.remove("single-pane");
       }
     } finally {
       if (this.vxzSliceAbort === controller) {
@@ -2539,159 +3182,291 @@ class MeshSliceViewer {
     this.updateSlicePlaneOpacity();
   }
 
-  private renderLegend(counts: Map<CategoryKey, number>, labelCounts = new Map<number, number>()): void {
+  private renderLegend(
+    labelCounts: Map<string, { value: FieldValue; count: number }>,
+    noDataCount = 0,
+  ): void {
     this.legendList.replaceChildren();
-
-    if (this.activeVolume?.visualization === "scalarField") {
-      const items: Array<{ color: string; label: string; value: string }> = [
-        { color: "#ffffff", label: "Zero level", value: "0" },
-        { color: "#e60d0d", label: "Positive / outside", value: `0..${SCALAR_DISTANCE_BLACK_THRESHOLD}` },
-        { color: "#0d33f2", label: "Negative / inside", value: `-${SCALAR_DISTANCE_BLACK_THRESHOLD}..0` },
-        { color: "#000000", label: "Far field", value: `|v| > ${SCALAR_DISTANCE_BLACK_THRESHOLD}` },
-      ];
-
-      for (const item of items) {
-        const row = document.createElement("div");
-        row.className = "legend-row";
-
-        const swatch = document.createElement("span");
-        swatch.className = "swatch";
-        swatch.style.background = item.color;
-
-        const label = document.createElement("span");
-        label.textContent = item.label;
-
-        const value = document.createElement("strong");
-        value.textContent = item.value;
-
-        row.append(swatch, label, value);
-        this.legendList.append(row);
-      }
+    const field = this.activeVolume;
+    if (!field) {
       return;
     }
 
-    if (this.activeVolume?.visualization === "linfinityDistanceCases") {
-      const visibleLabels = Array.from(labelCounts.entries()).sort((a, b) => a[0] - b[0]);
-
-      if (visibleLabels.length === 0) {
-        const empty = document.createElement("span");
-        empty.className = "legend-empty";
-        empty.textContent = "No L-infinity cases on this slice";
-        this.legendList.append(empty);
-        return;
+    if (field.definition.semantic === "continuous") {
+      const [minimum, maximum] = this.continuousRange(field);
+      const isovalue = field.definition.continuousStyle.isovalue
+        ?? field.definition.continuousStyle.center
+        ?? (minimum + maximum) / 2;
+      this.appendLegendRow(this.continuousCssColor(minimum), "Range minimum", formatCompactNumber(minimum));
+      this.appendLegendRow(this.continuousCssColor(isovalue), "Isovalue", formatCompactNumber(isovalue));
+      this.appendLegendRow(this.continuousCssColor(maximum), "Range maximum", formatCompactNumber(maximum));
+      if (noDataCount > 0) {
+        this.appendLegendRow(rgbToCss(NO_DATA_COLOR), "No data · current slice", noDataCount.toLocaleString());
       }
-
-      for (const [labelValue, countValue] of visibleLabels) {
-        const row = document.createElement("div");
-        row.className = "legend-row";
-
-        const swatch = document.createElement("span");
-        swatch.className = "swatch";
-        const [r, g, b] = colorForLabel(labelValue, "linfCase", "linfinityDistanceCases");
-        swatch.style.background = `rgb(${r} ${g} ${b})`;
-
-        const label = document.createElement("span");
-        label.className = "legend-label";
-        const labelText = this.labelTextForValue(labelValue, `L-infinity case ${labelValue}`);
-        label.textContent = shortLabelPhrase(labelText, `case ${labelValue}`);
-        label.title = labelText;
-
-        const count = document.createElement("strong");
-        count.textContent = countValue.toLocaleString();
-
-        row.title = labelText;
-        row.append(swatch, label, count);
-        this.legendList.append(row);
-      }
+      const note = document.createElement("span");
+      note.className = "legend-empty";
+      note.textContent = field.definition.continuousStyle.range
+        ? "Exact values · current slice"
+        : field.array.data.length > 1_000_000
+          ? "Exact slice · automatic display range sampled from field"
+          : "Exact slice · automatic display range scanned from field";
+      this.legendList.append(note);
       return;
     }
 
-    const visibleKeys = CATEGORY_ORDER.filter((key) => (counts.get(key) ?? 0) > 0);
-
-    if (visibleKeys.length === 0) {
+    const filter = this.activeVolumeSlot()?.labelFilter ?? createLabelFilterState();
+    if (noDataCount > 0) {
+      this.appendLegendRow(rgbToCss(NO_DATA_COLOR), "No data · current slice", noDataCount.toLocaleString());
+    }
+    const schemaOrder = new Map(Object.keys(field.definition.labels).map((key, index) => [key, index]));
+    const visibleLabels = Array.from(labelCounts.values()).sort((left, right) => {
+      if (field.definition.categoricalPreset === "instances") {
+        return right.count - left.count || fieldValueKey(left.value).localeCompare(fieldValueKey(right.value));
+      }
+      const leftOrder = schemaOrder.get(fieldValueKey(left.value)) ?? Number.MAX_SAFE_INTEGER;
+      const rightOrder = schemaOrder.get(fieldValueKey(right.value)) ?? Number.MAX_SAFE_INTEGER;
+      return leftOrder - rightOrder || fieldValueKey(left.value).localeCompare(fieldValueKey(right.value));
+    });
+    const matchingLabels = visibleLabels.filter((entry) => {
+      const key = fieldValueKey(entry.value);
+      return labelMatchesQuery(filter.query, key, labelDefinitionForValue(entry.value, field.definition.labels));
+    });
+    if (matchingLabels.length === 0) {
       const empty = document.createElement("span");
       empty.className = "legend-empty";
-      empty.textContent = "No labels on this slice";
+      empty.textContent = filter.query ? "No labels match this search on the current slice" : "No valid labels on this slice";
       this.legendList.append(empty);
       return;
     }
 
-    for (const key of visibleKeys) {
-      const definition = CATEGORIES[key];
-
-      const row = document.createElement("div");
-      row.className = "legend-row";
-
-      const swatch = document.createElement("span");
-      swatch.className = "swatch";
-      swatch.style.background = definition.color;
-
-      const label = document.createElement("span");
-      label.textContent = definition.label;
-
-      const count = document.createElement("strong");
-      count.textContent = (counts.get(key) ?? 0).toLocaleString();
-
-      row.append(swatch, label, count);
-      this.legendList.append(row);
+    const limit = 100;
+    for (const entry of matchingLabels.slice(0, limit)) {
+      const schema = labelDefinitionForValue(entry.value, field.definition.labels);
+      const id = formatFieldValue(entry.value);
+      const label = schema?.name
+        ? `${schema.name} · ${id}`
+        : field.definition.categoricalPreset === "instances" ? `Instance ${id}` : `Label ${id}`;
+      this.appendLabelLegendRow(entry.value, label, entry.count, filter);
     }
+    if (matchingLabels.length > limit) {
+      const more = document.createElement("span");
+      more.className = "legend-empty";
+      more.textContent = `${(matchingLabels.length - limit).toLocaleString()} more matching labels on this slice`;
+      this.legendList.append(more);
+    }
+  }
+
+  private appendLabelLegendRow(
+    value: FieldValue,
+    text: string,
+    countValue: number,
+    state: LabelFilterState,
+  ): void {
+    const slot = this.activeVolumeSlot();
+    if (!slot) {
+      return;
+    }
+    const key = fieldValueKey(value);
+    const visible = isLabelVisible(state, key);
+    const isolated = state.isolatedLabelKey === key;
+    const highlighted = isLabelHighlighted(state, key);
+    const row = document.createElement("div");
+    row.className = "legend-row";
+    row.classList.toggle("label-hidden", !visible);
+    row.classList.toggle("label-locked", highlighted);
+    const swatch = document.createElement("span");
+    swatch.className = "swatch";
+    swatch.style.background = this.categoricalCssColor(value);
+    const label = document.createElement("span");
+    label.className = "legend-label";
+    label.textContent = text;
+    label.title = text;
+    const count = document.createElement("strong");
+    count.textContent = countValue.toLocaleString();
+    const actions = document.createElement("span");
+    actions.className = "legend-actions";
+    const visibility = document.createElement("button");
+    visibility.type = "button";
+    visibility.textContent = visible ? "Hide" : "Show";
+    visibility.title = `${visibility.textContent} ${text}`;
+    visibility.addEventListener("click", () => {
+      let current = slot.labelFilter ?? createLabelFilterState();
+      if (current.isolatedLabelKey !== null) {
+        current = isolateLabel(current, null);
+      }
+      slot.labelFilter = setLabelHidden(current, key, visible);
+      this.renderSlice();
+    });
+    const isolate = document.createElement("button");
+    isolate.type = "button";
+    isolate.textContent = isolated ? "All" : "Only";
+    isolate.title = isolated ? "Show all labels" : `Isolate ${text}`;
+    isolate.addEventListener("click", () => {
+      const current = slot.labelFilter ?? createLabelFilterState();
+      slot.labelFilter = isolateLabel(current, isolated ? null : key);
+      this.renderSlice();
+    });
+    const lock = document.createElement("button");
+    lock.type = "button";
+    lock.textContent = highlighted ? "Unlock" : "Lock";
+    lock.title = highlighted ? "Clear locked highlight" : `Lock highlight on ${text}`;
+    lock.addEventListener("click", () => {
+      const current = slot.labelFilter ?? createLabelFilterState();
+      slot.labelFilter = lockLabelHighlight(current, highlighted ? null : key);
+      this.renderSlice();
+    });
+    actions.append(visibility, isolate, lock);
+    row.append(swatch, label, count, actions);
+    this.legendList.append(row);
+  }
+
+  private appendLegendRow(color: string, text: string, value: string): void {
+    const row = document.createElement("div");
+    row.className = "legend-row";
+    const swatch = document.createElement("span");
+    swatch.className = "swatch";
+    swatch.style.background = color;
+    const label = document.createElement("span");
+    label.className = "legend-label";
+    label.textContent = text;
+    label.title = text;
+    const count = document.createElement("strong");
+    count.textContent = value;
+    row.append(swatch, label, count);
+    this.legendList.append(row);
   }
 
   private sampleSlicePixel(px: number, py: number, height: number): SliceSample {
     const volume = this.activeVolume;
-    if (!volume) {
+    const fieldSlice = this.activeFieldSlice;
+    if (!volume || !fieldSlice) {
       return {
         grid: [0, 0, 0],
-        worldIndex: [0, 0, 0],
         world: new THREE.Vector3(),
-        label: Number.NaN,
+        value: Number.NaN,
         category: null,
       };
     }
 
-    const dims = this.getWorldDims();
-    const u = px;
-    const v = height - 1 - py;
-    let worldIndex: [number, number, number];
-
-    if (this.sliceAxis === "x") {
-      worldIndex = [this.sliceIndex, v, u];
-    } else if (this.sliceAxis === "y") {
-      worldIndex = [u, this.sliceIndex, v];
-    } else {
-      worldIndex = [u, v, this.sliceIndex];
-    }
-
-    const grid = worldIndex;
-    const [nx, ny, nz] = volume.shape;
-    const offset = volume.fortranOrder
-      ? grid[0] + nx * (grid[1] + ny * grid[2])
-      : grid[2] + nz * (grid[1] + ny * grid[0]);
-    const label = Number(volume.data[offset]);
-    const { category } = this.getSampleDisplay({ grid, worldIndex, world: new THREE.Vector3(), label, category: null });
-    const world = new THREE.Vector3(
-      indexToWorld(worldIndex[0], dims[0]),
-      indexToWorld(worldIndex[1], dims[1]),
-      indexToWorld(worldIndex[2], dims[2]),
+    const grid = slicePixelToLogicalIndex(
+      volume.definition.logicalShape,
+      this.sliceAxis,
+      this.sliceIndex,
+      px,
+      py,
     );
-
-    return { grid, worldIndex, world, label, category };
+    const offset = (height - 1 - py) * fieldSlice.shape[0] + px;
+    const value = fieldSlice.values[offset];
+    const world = vectorFromWorldPoint(transformIndexToWorld(grid, volume.definition.indexToWorld));
+    const { category } = this.getSampleDisplay({ grid, world, value, category: null });
+    return { grid, world, value, category };
   }
 
   private getSampleDisplay(sample: SliceSample): {
-    category: CategoryKey | null;
+    category: PipelineCategoryKey | null;
     color: [number, number, number];
+    visible: boolean;
   } {
     const volume = this.activeVolume;
     if (!volume) {
-      return { category: null, color: [127, 127, 127] };
+      return { category: null, color: [127, 127, 127], visible: false };
     }
 
-    const category = classifyVolumeLabel(sample.label, volume.visualization);
+    if (isNoDataValue(sample.value, volume.definition.validity)) {
+      return { category: null, color: NO_DATA_COLOR, visible: true };
+    }
+    if (volume.definition.semantic === "continuous") {
+      return { category: null, color: cssColorToRgb(this.continuousCssColor(sample.value)), visible: true };
+    }
+    const presetId = this.activePipelineVisualization(volume);
+    const category = presetId ? classifyPipelineValue(sample.value, presetId) : null;
+    const schema = labelDefinitionForValue(sample.value, volume.definition.labels);
+    const filter = this.activeVolumeSlot()?.labelFilter ?? createLabelFilterState();
+    const key = fieldValueKey(sample.value);
+    if (!isLabelVisible(filter, key)) {
+      return { category, color: DOT_BACKGROUND, visible: false };
+    }
+    const schemaColor = schema?.color;
+    let color = schemaColor
+      ? cssColorToRgb(schemaColor)
+      : presetId
+        ? pipelineColorForValue(sample.value, presetId)
+        : cssColorToRgb(categoricalColorForValue(sample.value, volume.definition.labels));
+    if (filter.lockedHighlightKey !== null && !isLabelHighlighted(filter, key)) {
+      color = mixRgb(color, DOT_BACKGROUND, 0.78);
+    }
     return {
       category,
-      color: colorForLabel(sample.label, category, volume.visualization),
+      color,
+      visible: true,
     };
+  }
+
+  private categoricalCssColor(value: FieldValue): string {
+    const field = this.activeVolume;
+    if (!field) {
+      return "#7f7f7f";
+    }
+    if (isNoDataValue(value, field.definition.validity)) {
+      return rgbToCss(NO_DATA_COLOR);
+    }
+    const schemaColor = labelDefinitionForValue(value, field.definition.labels)?.color;
+    if (schemaColor) {
+      return schemaColor;
+    }
+    const presetId = this.activePipelineVisualization(field);
+    if (presetId) {
+      return rgbToCss(pipelineColorForValue(value, presetId));
+    }
+    return categoricalColorForValue(value, field.definition.labels);
+  }
+
+  private activePipelineVisualization(field: DenseField): PipelineVisualization | undefined {
+    return applicablePipelineVisualization(
+      field.array.name,
+      field.definition.semantic,
+      field.definition.categoricalPreset,
+    );
+  }
+
+  private continuousRange(field: DenseField): [number, number] {
+    const configured = field.definition.continuousStyle.range;
+    if (configured && configured[0] < configured[1]) {
+      return [configured[0], configured[1]];
+    }
+    const cached = this.autoRanges.get(field);
+    if (cached) {
+      return cached;
+    }
+    const range = automaticContinuousRange(field.array.data, field.definition.validity);
+    this.autoRanges.set(field, range);
+    return range;
+  }
+
+  private continuousCssColor(value: FieldValue): string {
+    const field = this.activeVolume;
+    if (!field) {
+      return "#7f7f7f";
+    }
+    if (isNoDataValue(value, field.definition.validity)) {
+      return rgbToCss(NO_DATA_COLOR);
+    }
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) {
+      return field.definition.continuousStyle.outOfRangeColor ?? "#000000";
+    }
+    const range = this.continuousRange(field);
+    const palette = field.definition.stylePreset ?? this.continuousColorMap.value;
+    if (palette === "viridis") {
+      return interpolatePalette(VIRIDIS_PALETTE, normalizeRange(numeric, range));
+    }
+    if (palette === "grayscale") {
+      return grayscaleColorForAmount(normalizeRange(numeric, range));
+    }
+    return continuousColorForValue(numeric, {
+      ...field.definition.continuousStyle,
+      range,
+    });
   }
 
   private getWorldDims(): [number, number, number] {
@@ -2703,8 +3478,7 @@ class MeshSliceViewer {
       return [1, 1, 1];
     }
 
-    const [nx, ny, nz] = this.activeVolume.shape;
-    return [nx, ny, nz];
+    return [...this.activeVolume.definition.logicalShape];
   }
 
   private hasSliceSource(): boolean {
@@ -2718,84 +3492,274 @@ class MeshSliceViewer {
     return indexToWorld(index, dimension);
   }
 
+  private drawPinnedCrosshair(cornerDotMode: boolean): void {
+    const point = this.viewerState.pinnedGridPoint;
+    const fieldSlice = this.activeFieldSlice;
+    if (!point || !fieldSlice || point[axisToIndex(this.sliceAxis)] !== this.sliceIndex) {
+      return;
+    }
+    const [px, py] = gridToFieldSlicePixel(this.sliceAxis, point, fieldSlice.shape[1]);
+    const x = cornerDotMode ? DOT_MARGIN + px * DOT_SPACING : px + 0.5;
+    const y = cornerDotMode ? DOT_MARGIN + py * DOT_SPACING : py + 0.5;
+    const context = this.sliceContext;
+    context.save();
+    context.strokeStyle = "rgba(255, 255, 255, 0.96)";
+    context.lineWidth = cornerDotMode ? 1.5 : 1;
+    context.beginPath();
+    context.moveTo(0, y);
+    context.lineTo(this.sliceCanvas.width, y);
+    context.moveTo(x, 0);
+    context.lineTo(x, this.sliceCanvas.height);
+    context.stroke();
+    context.strokeStyle = "rgba(17, 24, 39, 0.96)";
+    context.strokeRect(x - 2.5, y - 2.5, 5, 5);
+    context.restore();
+  }
+
+  private drawContinuousContours(cornerDotMode: boolean): void {
+    const field = this.activeVolume;
+    const slice = this.activeFieldSlice;
+    if (
+      !field
+      || !slice
+      || field.definition.semantic !== "continuous"
+      || !this.continuousContours.checked
+    ) {
+      return;
+    }
+    const [width, height] = slice.shape;
+    const level = field.definition.continuousStyle.isovalue
+      ?? field.definition.continuousStyle.center
+      ?? 0;
+    const position = (x: number, y: number): [number, number] => cornerDotMode
+      ? [DOT_MARGIN + x * DOT_SPACING, DOT_MARGIN + y * DOT_SPACING]
+      : [x + 0.5, y + 0.5];
+    const valueAt = (x: number, y: number): number => {
+      const value = slice.values[(height - 1 - y) * width + x];
+      return isNoDataValue(value, field.definition.validity) ? Number.NaN : Number(value);
+    };
+    const context = this.sliceContext;
+    context.save();
+    context.strokeStyle = "rgba(17, 24, 39, 0.92)";
+    context.lineWidth = cornerDotMode ? 1.2 : 0.75;
+    context.beginPath();
+    for (let y = 0; y < height - 1; y += 1) {
+      for (let x = 0; x < width - 1; x += 1) {
+        const corners = [valueAt(x, y), valueAt(x + 1, y), valueAt(x + 1, y + 1), valueAt(x, y + 1)];
+        if (corners.some((value) => !Number.isFinite(value))) {
+          continue;
+        }
+        const points: Array<[number, number]> = [];
+        const edges: Array<[number, number, [number, number], [number, number]]> = [
+          [0, 1, [x, y], [x + 1, y]],
+          [1, 2, [x + 1, y], [x + 1, y + 1]],
+          [2, 3, [x + 1, y + 1], [x, y + 1]],
+          [3, 0, [x, y + 1], [x, y]],
+        ];
+        for (const [startIndex, endIndex, start, end] of edges) {
+          const startValue = corners[startIndex];
+          const endValue = corners[endIndex];
+          if ((startValue < level && endValue < level) || (startValue > level && endValue > level) || startValue === endValue) {
+            continue;
+          }
+          const t = clamp((level - startValue) / (endValue - startValue), 0, 1);
+          points.push(position(
+            start[0] + (end[0] - start[0]) * t,
+            start[1] + (end[1] - start[1]) * t,
+          ));
+        }
+        for (let pointIndex = 0; pointIndex + 1 < points.length; pointIndex += 2) {
+          context.moveTo(points[pointIndex][0], points[pointIndex][1]);
+          context.lineTo(points[pointIndex + 1][0], points[pointIndex + 1][1]);
+        }
+      }
+    }
+    context.stroke();
+    context.restore();
+  }
+
+  private updateSelectionMarker(): void {
+    const field = this.activeVolume;
+    const point = this.viewerState.pinnedGridPoint;
+    if (!field || !point || this.vxzMetadata) {
+      this.selectionMarker.visible = false;
+      return;
+    }
+    this.selectionMarker.position.copy(
+      vectorFromWorldPoint(transformIndexToWorld(point, field.definition.indexToWorld)),
+    );
+    const size = this.fieldWorldBounds(field).getSize(new THREE.Vector3());
+    const radius = Math.max(size.x, size.y, size.z, 1) * 0.012;
+    this.selectionMarker.scale.setScalar(radius);
+    this.selectionMarker.visible = true;
+  }
+
   private inspectSlicePointer(event: PointerEvent): void {
     if (this.vxzMetadata) {
       this.inspectVxzSlicePointer(event);
       return;
     }
-    if (!this.activeVolume || this.sliceCanvas.width === 0 || this.sliceCanvas.height === 0) {
-      this.setInspector();
-      return;
+    const sample = this.sliceSampleFromPointer(event);
+    if (sample) {
+      this.setInspectorForSample(sample);
+    } else {
+      this.showPinnedInspectorOrClear();
     }
+  }
 
+  private sliceSampleFromPointer(event: PointerEvent): SliceSample | null {
+    if (
+      !this.activeVolume
+      || !this.activeFieldSlice
+      || this.activeFieldSlice.axis !== this.sliceAxis
+      || this.activeFieldSlice.index !== this.sliceIndex
+      || this.sliceCanvas.width === 0
+      || this.sliceCanvas.height === 0
+    ) {
+      return null;
+    }
     const rect = this.sliceCanvas.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) {
+      return null;
+    }
     const canvasX = (event.clientX - rect.left) / rect.width * this.sliceCanvas.width;
     const canvasY = (event.clientY - rect.top) / rect.height * this.sliceCanvas.height;
-    let sample: SliceSample;
-
+    const [gridWidth, gridHeight] = this.activeFieldSlice.shape;
+    let px: number;
+    let py: number;
     if ((this.sliceRenderMode.value as SliceRenderMode) === "cornerDots") {
-      const dims = this.getWorldDims();
-      const [gridWidth, gridHeight] = this.sliceAxis === "x"
-        ? [dims[2], dims[1]]
-        : this.sliceAxis === "y"
-          ? [dims[0], dims[2]]
-          : [dims[0], dims[1]];
-      const px = Math.round((canvasX - DOT_MARGIN) / DOT_SPACING);
-      const py = Math.round((canvasY - DOT_MARGIN) / DOT_SPACING);
-
-      if (px < 0 || py < 0 || px >= gridWidth || py >= gridHeight) {
-        this.setInspector();
-        return;
-      }
-
+      px = Math.round((canvasX - DOT_MARGIN) / DOT_SPACING);
+      py = Math.round((canvasY - DOT_MARGIN) / DOT_SPACING);
       const centerX = DOT_MARGIN + px * DOT_SPACING;
       const centerY = DOT_MARGIN + py * DOT_SPACING;
       if (Math.hypot(canvasX - centerX, canvasY - centerY) > DOT_RADIUS + 0.75) {
-        this.setInspector();
-        return;
+        return null;
       }
-
-      sample = this.sampleSlicePixel(px, py, gridHeight);
     } else {
-      const px = clamp(Math.floor(canvasX), 0, this.sliceCanvas.width - 1);
-      const py = clamp(Math.floor(canvasY), 0, this.sliceCanvas.height - 1);
-      sample = this.sampleSlicePixel(px, py, this.sliceCanvas.height);
+      px = Math.floor(canvasX);
+      py = Math.floor(canvasY);
     }
+    if (px < 0 || py < 0 || px >= gridWidth || py >= gridHeight) {
+      return null;
+    }
+    return this.sampleSlicePixel(px, py, gridHeight);
+  }
 
-    if (this.activeVolume.visualization === "scalarField") {
-      const value = Number.isFinite(sample.label) ? sample.label.toFixed(6) : String(sample.label);
-      const side = !Number.isFinite(sample.label)
-        ? "-"
-        : Math.abs(sample.label) > SCALAR_DISTANCE_BLACK_THRESHOLD
-          ? "far field"
-          : sample.label >= 0
-            ? "positive / outside"
-            : "negative / inside";
+  private setInspectorForSample(sample: SliceSample): void {
+    const field = this.activeVolume;
+    if (!field) {
+      this.setInspector();
+      return;
+    }
+    const common: Record<string, string> = {
+      Field: field.definition.name,
+      Grid: `[${sample.grid.join(", ")}]`,
+      World: `[${sample.world.x.toFixed(6)}, ${sample.world.y.toFixed(6)}, ${sample.world.z.toFixed(6)}]`,
+      Fidelity: "exact",
+    };
+    if (field.definition.valueDescription) {
+      common.Meaning = field.definition.valueDescription;
+    }
+    const valueKey = fieldValueKey(sample.value);
+    const noData = isNoDataValue(sample.value, field.definition.validity);
+    if (field.definition.validity.noDataValues) {
+      common.Validity = noData ? "no data" : "valid";
+    }
+    if (field.definition.validity.description) {
+      common["Validity note"] = field.definition.validity.description;
+    }
+    if (field.definition.sparseDefault !== undefined) {
+      common.Storage = field.definition.sparseDefault === valueKey
+        ? "equals sparse default"
+        : "differs from sparse default";
+    }
+    if (field.definition.semantic === "continuous") {
+      const numeric = Number(sample.value);
+      const isovalue = field.definition.continuousStyle.isovalue
+        ?? field.definition.continuousStyle.center
+        ?? 0;
       this.setInspector({
-        Grid: `[${sample.grid.join(", ")}]`,
-        World: `[${sample.world.x.toFixed(4)}, ${sample.world.y.toFixed(4)}, ${sample.world.z.toFixed(4)}]`,
-        Value: value,
-        Side: side,
+        ...common,
+        Value: formatFieldValue(sample.value),
+        "Isovalue relation": !noData && Number.isFinite(numeric)
+          ? numeric < isovalue ? "below" : numeric > isovalue ? "above" : "equal"
+          : "-",
       });
       return;
     }
+    const schema = labelDefinitionForValue(sample.value, field.definition.labels);
+    this.setInspector({
+      ...common,
+      "Label ID": formatFieldValue(sample.value),
+      Name: schema?.name ?? "-",
+      Group: schema?.group ?? "-",
+      Role: schema?.background ? "background" : "label",
+      Category: sample.category ? pipelineCategoryDisplayName(sample.category) : "-",
+    });
+  }
 
-    const label = Number.isInteger(sample.label) ? String(sample.label) : sample.label.toFixed(4);
-    const labelText = this.activeVolume.visualization === "finalCclComponents" && sample.label > 3
-      ? `component ${Number.isInteger(sample.label - 3) ? String(sample.label - 3) : (sample.label - 3).toFixed(4)}`
-      : this.activeVolume.visualization === "finalCclCases" && sample.category
-        ? `${label} ${categoryDisplayName(sample.category)}`
-        : this.activeVolume.visualization === "linfinityDistanceCases"
-          ? shortLabelPhrase(this.labelTextForValue(sample.label, `case ${label}`), `case ${label}`)
-        : label;
-    const values: Record<string, string> = {
-      Grid: `[${sample.grid.join(", ")}]`,
-      World: `[${sample.world.x.toFixed(4)}, ${sample.world.y.toFixed(4)}, ${sample.world.z.toFixed(4)}]`,
-      Label: labelText,
-      Category: sample.category ? categoryDisplayName(sample.category) : "-",
-    };
+  private pinSlicePointer(event: PointerEvent): void {
+    if (this.vxzMetadata || !this.activeVolume) {
+      return;
+    }
+    const sample = this.sliceSampleFromPointer(event);
+    if (!sample) {
+      return;
+    }
+    this.viewerState = pinGridPoint(this.viewerState, sample.grid, this.activeVolume.definition.logicalShape);
+    this.clearSelectedPoint.classList.remove("hidden");
+    this.updateSliceControls(false);
+    this.updateSlicePlane();
+    this.updateSelectionMarker();
+    this.renderSlice();
+    this.setInspectorForSample(sample);
+  }
 
-    this.setInspector(values);
+  private clearPinnedFieldPoint(): void {
+    this.viewerState = clearPinnedPoint(this.viewerState);
+    this.selectionMarker.visible = false;
+    this.clearSelectedPoint.classList.add("hidden");
+    this.renderSlice();
+    this.setInspector();
+  }
+
+  private showPinnedInspectorOrClear(): void {
+    const point = this.viewerState.pinnedGridPoint;
+    const provider = this.activeProvider;
+    if (!point || !provider || this.vxzMetadata) {
+      this.setInspector();
+      return;
+    }
+    const requestToken = ++this.inspectorRequestToken;
+    void provider.readPoint(point).then((result) => {
+      if (
+        requestToken !== this.inspectorRequestToken
+        ||
+        provider !== this.activeProvider
+        || (this.viewerState.pinnedGridPoint !== point && !sameGridPoint(this.viewerState.pinnedGridPoint, point))
+      ) {
+        return;
+      }
+      const activeVolume = this.activeVolume;
+      const presetId = activeVolume ? this.activePipelineVisualization(activeVolume) : undefined;
+      const category = presetId && activeVolume && !isNoDataValue(result.value, activeVolume.definition.validity)
+        ? classifyPipelineValue(result.value, presetId)
+        : null;
+      this.setInspectorForSample({
+        grid: result.index,
+        world: vectorFromWorldPoint(result.world),
+        value: result.value,
+        category,
+      });
+    }).catch(() => {
+      if (
+        requestToken === this.inspectorRequestToken
+        && provider === this.activeProvider
+        && (this.viewerState.pinnedGridPoint === point || sameGridPoint(this.viewerState.pinnedGridPoint, point))
+      ) {
+        this.setInspector();
+      }
+    });
   }
 
   private inspectVxzSlicePointer(event: PointerEvent): void {
@@ -2844,16 +3808,8 @@ class MeshSliceViewer {
     });
   }
 
-  private labelTextForValue(value: number, fallback: string): string {
-    if (!this.activeVolume || !Number.isFinite(value)) {
-      return fallback;
-    }
-
-    const key = String(Math.trunc(value));
-    return this.activeVolume.labelMetadata?.labels?.[key] ?? fallback;
-  }
-
   private setInspector(values?: Record<string, string>): void {
+    this.inspectorRequestToken += 1;
     const data = values ?? {
       Grid: "-",
       World: "-",
@@ -2872,12 +3828,42 @@ class MeshSliceViewer {
   }
 
   private resetCamera(): void {
-    this.camera.position.set(2.05, 1.62, 1.9);
-    this.camera.near = 0.01;
-    this.camera.far = 80;
+    let bounds = this.activeVolume
+      ? this.fieldWorldBounds(this.activeVolume)
+      : this.vxzMetadata
+        ? new THREE.Box3(new THREE.Vector3(-0.5, -0.5, -0.5), new THREE.Vector3(0.5, 0.5, 0.5))
+        : new THREE.Box3().setFromObject(this.meshRoot);
+    if (this.activeVolume) {
+      const displayedSliceBounds = new THREE.Box3().setFromObject(this.sliceRoot);
+      if (!displayedSliceBounds.isEmpty()) {
+        bounds.union(displayedSliceBounds);
+      }
+    }
+    if (bounds.isEmpty()) {
+      bounds = new THREE.Box3(new THREE.Vector3(-1, -1, -1), new THREE.Vector3(1, 1, 1));
+    }
+    const center = bounds.getCenter(new THREE.Vector3());
+    const radius = Math.max(bounds.getSize(new THREE.Vector3()).length() / 2, 0.01);
+    const direction = new THREE.Vector3(2.05, 1.62, 1.9).normalize();
+    const distance = Math.max(radius * 2.35, 0.1);
+    this.camera.position.copy(center).addScaledVector(direction, distance);
+    this.camera.near = Math.max(radius / 1000, 0.0001);
+    this.camera.far = Math.max(radius * 100, 80);
     this.camera.updateProjectionMatrix();
-    this.controls.target.set(0, 0, 0);
+    this.controls.target.copy(center);
     this.controls.update();
+  }
+
+  private fieldWorldBounds(field: DenseField): THREE.Box3 {
+    const bounds = new THREE.Box3();
+    for (const corner of worldDomainCorners(
+      field.definition.logicalShape,
+      field.definition.association,
+      field.definition.indexToWorld,
+    )) {
+      bounds.expandByPoint(vectorFromWorldPoint(corner));
+    }
+    return bounds;
   }
 
   private frameVxzMesh(): void {
@@ -3035,6 +4021,11 @@ class RemoteFileHandle implements SourceFile {
 
     entry.promise = this.downloadArrayBuffer(entry, signal)
       .then(async (buffer) => {
+        if (this.size !== null && buffer.byteLength !== this.size) {
+          throw new Error(
+            `Remote file ${this.name} ended at ${formatBytes(buffer.byteLength)}; expected ${formatBytes(this.size)}.`,
+          );
+        }
         entry.promise = undefined;
         entry.loaded = buffer.byteLength;
         entry.total = entry.total ?? buffer.byteLength;
@@ -3160,7 +4151,12 @@ async function readCachedRemoteFile(
       return null;
     }
 
-    if ((size !== null && record.size !== size) || (mtimeMs !== null && record.mtimeMs !== mtimeMs)) {
+    if (
+      (size !== null && record.size !== size)
+      || (size !== null && record.buffer.byteLength !== size)
+      || (record.size !== null && record.buffer.byteLength !== record.size)
+      || (mtimeMs !== null && record.mtimeMs !== mtimeMs)
+    ) {
       await Promise.all([
         idbDelete(REMOTE_CACHE_STORE, path),
         idbDelete(REMOTE_CACHE_META_STORE, path),
@@ -3403,7 +4399,7 @@ function findPipelineFolderSelection(files: SourceFile[]): PipelineFolderSelecti
   const meshesByDirectory = new Map<string, SourceFile[]>();
   const volumesByDirectory = new Map<string, Array<{ order: number; file: SourceFile }>>();
   const npyNamesByDirectory = new Map<string, string[]>();
-  const manifestByDirectory = new Map<string, SourceFile>();
+  const manifestsByDirectory = new Map<string, SourceFile[]>();
 
   for (const file of files) {
     const path = file.webkitRelativePath || file.name;
@@ -3412,8 +4408,10 @@ function findPipelineFolderSelection(files: SourceFile[]): PipelineFolderSelecti
     const directory = parts.join("/");
     const lowerName = name.toLowerCase();
 
-    if (lowerName === "npy_labels.json") {
-      manifestByDirectory.set(directory, file);
+    if (["fields.json", "field_metadata.json", "npy_fields.json", "npy_labels.json"].includes(lowerName)) {
+      const manifests = manifestsByDirectory.get(directory) ?? [];
+      manifests.push(file);
+      manifestsByDirectory.set(directory, manifests);
       continue;
     }
 
@@ -3428,34 +4426,16 @@ function findPipelineFolderSelection(files: SourceFile[]): PipelineFolderSelecti
       continue;
     }
 
-    if (lowerName === "000_initial_ccl_labels.npy") {
-      addDirectoryVolume(volumesByDirectory, directory, 0, file);
+    if (!lowerName.endsWith(".npy")) {
       continue;
     }
 
-    if (lowerName === "999_scalar_field.npy") {
-      addDirectoryVolume(volumesByDirectory, directory, 999, file);
+    const preset = inferPipelinePreset(name);
+    addDirectoryVolume(volumesByDirectory, directory, preset?.order ?? genericNpyFileOrder(name), file);
+    if (!preset?.group) {
       continue;
     }
-
-    if (lowerName === "999_linf_distance_cases.npy") {
-      addDirectoryVolume(volumesByDirectory, directory, 999.1, file);
-      continue;
-    }
-
-    const standalone = parseStandalonePipelineNpyFileName(name);
-    if (standalone) {
-      addDirectoryVolume(volumesByDirectory, directory, standalone.order, file);
-      continue;
-    }
-
-    const parsed = parsePipelineNpyFileName(name);
-    if (!parsed) {
-      continue;
-    }
-
-    const { prefix, role } = parsed;
-    addDirectoryVolume(volumesByDirectory, directory, pipelineVolumeOrder(name, role), file);
+    const { prefix, role } = preset.group;
     const key = `${directory}\u0000${prefix}`;
     const candidate = candidates.get(key) ?? { directory, prefix };
     if (role === "components") {
@@ -3487,7 +4467,7 @@ function findPipelineFolderSelection(files: SourceFile[]): PipelineFolderSelecti
     const volumeDirectories = Array.from(volumesByDirectory.keys());
     if (volumeDirectories.length === 0) {
       throw new Error(
-        "No supported pipeline .npy files were found. Expected files such as 000_original_boundary.npy, 001_closed_boundary.npy, 002_free_space_labels.npy, 003_pseudo_boundary_components.npy, 004_final_labels.npy, 000_initial_ccl_labels.npy, NNN_final_ccl_labels.npy, NNN_final_ccl_components.npy, NNN_final_ccl_cases.npy, MMM_inside_filtered_labels.npy, SSS_surface_boundary_classification.npy, 999_scalar_field.npy, or 999_linf_distance_cases.npy.",
+        "No 3D NumPy .npy fields were found in the selected folder.",
       );
     }
     directory = volumeDirectories.sort((a, b) => directoryRank(b, meshesByDirectory, volumesByDirectory) - directoryRank(a, meshesByDirectory, volumesByDirectory) || a.localeCompare(b))[0];
@@ -3499,76 +4479,56 @@ function findPipelineFolderSelection(files: SourceFile[]): PipelineFolderSelecti
 
   if (volumes.length === 0) {
     const found = (npyNamesByDirectory.get(directory) ?? []).sort((a, b) => a.localeCompare(b));
-    throw new Error(`No loadable pipeline .npy files were found in ${directory || "(selected folder)"}. Found .npy: ${found.join(", ") || "none"}.`);
+    throw new Error(`No loadable 3D NumPy fields were found in ${directory || "(selected folder)"}. Found .npy: ${found.join(", ") || "none"}.`);
   }
 
   return {
     directory,
     volumes,
     meshes: sortPipelineMeshes(meshesByDirectory.get(directory) ?? []),
-    manifest: manifestByDirectory.get(directory),
+    manifests: [...(manifestsByDirectory.get(directory) ?? [])]
+      .sort((left, right) => manifestOrder(left.name) - manifestOrder(right.name) || left.name.localeCompare(right.name)),
   };
 }
 
-async function loadNpyLabelManifest(file?: SourceFile): Promise<Map<string, VolumeLabelMetadata>> {
-  if (!file) {
-    return new Map();
-  }
-
-  try {
-    const manifest = JSON.parse(await file.text()) as {
-      files?: Record<string, {
-        kind?: unknown;
-        labels?: unknown;
-        dynamic_labels?: unknown;
-        value_description?: unknown;
-        isovalue?: unknown;
-      }>;
-    };
-    const result = new Map<string, VolumeLabelMetadata>();
-
-    for (const [name, metadata] of Object.entries(manifest.files ?? {})) {
-      result.set(baseFileName(name), {
-        kind: typeof metadata.kind === "string" ? metadata.kind : undefined,
-        labels: stringRecord(metadata.labels),
-        dynamicLabels: stringRecord(metadata.dynamic_labels),
-        valueDescription: typeof metadata.value_description === "string" ? metadata.value_description : undefined,
-        isovalue: typeof metadata.isovalue === "number" ? metadata.isovalue : undefined,
-      });
-    }
-
-    return result;
-  } catch {
-    return new Map();
-  }
+function genericNpyFileOrder(name: string): number {
+  const step = /^(\d+)_/.exec(baseFileName(name));
+  return step ? Number(step[1]) : 10_000;
 }
 
-function stringRecord(value: unknown): Record<string, string> | undefined {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
+async function loadFieldManifests(files: SourceFile[]): Promise<ParsedFieldManifest | undefined> {
+  if (files.length === 0) {
     return undefined;
   }
+  const combined: ParsedFieldManifest = {
+    sourceName: files.map((file) => file.name).join(", "),
+    format: "unknown",
+    defaults: {},
+    fields: new Map(),
+    warnings: [],
+  };
+  for (const file of files) {
+    try {
+      const parsed = parseFieldManifest(await file.text(), file.name);
+      combined.format = parsed.format === "fields" ? "fields" : combined.format === "fields" ? "fields" : parsed.format;
+      combined.defaults = mergeFieldMetadataPatches(combined.defaults, parsed.defaults);
+      for (const [name, patch] of parsed.fields) {
+        combined.fields.set(name, mergeFieldMetadataPatches(combined.fields.get(name), patch));
+      }
+      combined.warnings.push(...parsed.warnings);
+    } catch (error) {
+      combined.warnings.push(`${file.name}: ${errorMessage(error)}`);
+    }
+  }
+  return combined;
+}
 
-  const entries = Object.entries(value)
-    .filter((entry): entry is [string, string] => typeof entry[1] === "string");
-  return entries.length > 0 ? Object.fromEntries(entries) : undefined;
+function manifestOrder(name: string): number {
+  return baseFileName(name).toLowerCase() === "npy_labels.json" ? 0 : 1;
 }
 
 function baseFileName(name: string): string {
   return name.split("/").pop() ?? name;
-}
-
-function shortLabelPhrase(text: string, fallback: string): string {
-  const trimmed = text.trim();
-  if (!trimmed) {
-    return fallback;
-  }
-
-  const prefix = trimmed.split(":", 1)[0]?.trim();
-  if (prefix) {
-    return prefix;
-  }
-
-  return trimmed.length <= 28 ? trimmed : `${trimmed.slice(0, 25).trimEnd()}...`;
 }
 
 function addDirectoryMesh(meshesByDirectory: Map<string, SourceFile[]>, directory: string, file: SourceFile): void {
@@ -3609,7 +4569,7 @@ function directoryRank(
   volumesByDirectory: Map<string, Array<{ order: number; file: SourceFile }>>,
 ): number {
   const volumes = volumesByDirectory.get(directory) ?? [];
-  const nonScalarCount = volumes.filter((item) => !item.file.name.toLowerCase().endsWith("999_scalar_field.npy")).length;
+  const nonScalarCount = volumes.filter((item) => inferPipelinePreset(item.file.name)?.id !== "scalarField").length;
   return ((meshesByDirectory.get(directory)?.length ?? 0) > 0 ? 10000 : 0) + nonScalarCount * 100 + volumes.length;
 }
 
@@ -3624,69 +4584,6 @@ function candidateRank(candidate: PipelineFolderCandidate, meshesByDirectory: Ma
     + (candidate.surfaceBoundary ? 40 : 0)
     + (Number.isFinite(prefix) ? prefix : 0)
   );
-}
-
-function pipelineVolumeOrder(name: string, role: PipelineVolumeRole): number {
-  const step = Number(/^(\d{3})_/.exec(name)?.[1] ?? 0);
-  const roleOffset: Record<PipelineVolumeRole, number> = {
-    label: 0,
-    components: 0.1,
-    cases: 0.2,
-    insideFiltered: 0,
-    surfaceBoundary: 0,
-  };
-  return step + roleOffset[role];
-}
-
-function parseStandalonePipelineNpyFileName(name: string): { order: number } | null {
-  const lowerName = name.toLowerCase();
-  const match = /^(\d{3})_(original_boundary|closed_boundary|free_space_labels|pseudo_boundary_components|final_labels)\.npy$/i.exec(lowerName);
-  if (!match) {
-    return null;
-  }
-
-  return { order: Number(match[1]) };
-}
-
-function parsePipelineNpyFileName(name: string): { prefix: string; role: PipelineVolumeRole } | null {
-  const finalMatch = /^(\d{3})_final_ccl_(labels|components|cases)\.npy$/i.exec(name);
-  if (finalMatch) {
-    const roleBySuffix: Record<string, PipelineVolumeRole> = {
-      labels: "label",
-      components: "components",
-      cases: "cases",
-    };
-    return {
-      prefix: finalMatch[1],
-      role: roleBySuffix[finalMatch[2].toLowerCase()],
-    };
-  }
-
-  const auditMatch = /^(\d{3})_inside_filtered_labels\.npy$/i.exec(name);
-  if (auditMatch) {
-    const auditStep = Number(auditMatch[1]);
-    if (!Number.isInteger(auditStep) || auditStep <= 0) {
-      return null;
-    }
-    return {
-      prefix: String(auditStep - 1).padStart(3, "0"),
-      role: "insideFiltered",
-    };
-  }
-
-  const surfaceBoundaryMatch = /^(\d{3})_surface_boundary_classification\.npy$/i.exec(name);
-  if (surfaceBoundaryMatch) {
-    const surfaceBoundaryStep = Number(surfaceBoundaryMatch[1]);
-    if (!Number.isInteger(surfaceBoundaryStep) || surfaceBoundaryStep <= 2) {
-      return null;
-    }
-    return {
-      prefix: String(surfaceBoundaryStep - 2).padStart(3, "0"),
-      role: "surfaceBoundary",
-    };
-  }
-
-  return null;
 }
 
 async function fetchRemoteJson<T>(action: string, host: string, params: Record<string, string> = {}): Promise<T> {
@@ -3774,102 +4671,118 @@ function formatCacheAge(ms: number): string {
   return `${Math.max(1, Math.round(ms / day))}d`;
 }
 
-function colorForLabel(
-  label: number,
-  category: CategoryKey | null,
-  visualization: VolumeData["visualization"],
-): [number, number, number] {
-  if (visualization === "scalarField") {
-    if (!Number.isFinite(label) || Math.abs(label) > SCALAR_DISTANCE_BLACK_THRESHOLD) {
-      return [0, 0, 0];
-    }
-
-    const strength = Math.sqrt(Math.abs(label) / SCALAR_DISTANCE_BLACK_THRESHOLD);
-    const target: [number, number, number] = label >= 0 ? [0.9, 0.05, 0.05] : [0.05, 0.2, 0.95];
-    const r = 1 - strength + target[0] * strength;
-    const g = 1 - strength + target[1] * strength;
-    const b = 1 - strength + target[2] * strength;
-    return [
-      Math.round(clamp(r, 0, 1) * 255),
-      Math.round(clamp(g, 0, 1) * 255),
-      Math.round(clamp(b, 0, 1) * 255),
-    ];
-  }
-
-  if (visualization === "linfinityDistanceCases") {
-    if (!Number.isFinite(label)) {
-      return [127, 127, 127];
-    }
-    return componentColor(label);
-  }
-
-  if (category === "components") {
-    const componentId = visualization === "finalCclComponents" ? Math.max(0, label - 3) : label;
-    return componentColor(componentId);
-  }
-
-  if (!category) {
-    return [127, 127, 127];
-  }
-
-  const hex = CATEGORIES[category].color.replace("#", "");
-  return [
-    Number.parseInt(hex.slice(0, 2), 16),
-    Number.parseInt(hex.slice(2, 4), 16),
-    Number.parseInt(hex.slice(4, 6), 16),
-  ];
-}
-
-function componentColor(label: number): [number, number, number] {
-  const seed = Math.abs(Math.trunc(label));
-  const hue = ((seed * 137.508) % 360) / 360;
-  const [r, g, b] = hslToRgb(hue, 0.68, 0.57);
-  return [
-    Math.round(r * 255),
-    Math.round(g * 255),
-    Math.round(b * 255),
-  ];
-}
-
-function hslToRgb(h: number, s: number, l: number): [number, number, number] {
-  if (s === 0) {
-    return [l, l, l];
-  }
-
-  const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
-  const p = 2 * l - q;
-  return [
-    hueToRgb(p, q, h + 1 / 3),
-    hueToRgb(p, q, h),
-    hueToRgb(p, q, h - 1 / 3),
-  ];
-}
-
-function hueToRgb(p: number, q: number, t: number): number {
-  let value = t;
-  if (value < 0) {
-    value += 1;
-  }
-  if (value > 1) {
-    value -= 1;
-  }
-  if (value < 1 / 6) {
-    return p + (q - p) * 6 * value;
-  }
-  if (value < 1 / 2) {
-    return q;
-  }
-  if (value < 2 / 3) {
-    return p + (q - p) * (2 / 3 - value) * 6;
-  }
-  return p;
-}
-
 function indexToWorld(index: number, dimension: number): number {
   if (dimension <= 1) {
     return 0;
   }
   return -1 + index * 2 / (dimension - 1);
+}
+
+function continuousPalette(name: string): ContinuousStyle {
+  if (name === "sdf") {
+    return {
+      scale: "sqrt",
+      negativeColor: "#0d33f2",
+      centerColor: "#ffffff",
+      positiveColor: "#e60d0d",
+      outOfRangeColor: "#000000",
+    };
+  }
+  return {
+    scale: "linear",
+    negativeColor: "#2563eb",
+    centerColor: "#f8fafc",
+    positiveColor: "#dc2626",
+  };
+}
+
+function normalizeRange(value: number, range: readonly [number, number]): number {
+  return range[1] > range[0] ? clamp((value - range[0]) / (range[1] - range[0]), 0, 1) : 0.5;
+}
+
+function interpolatePalette(palette: readonly string[], amount: number): string {
+  const position = clamp(amount, 0, 1) * (palette.length - 1);
+  const start = Math.min(palette.length - 1, Math.floor(position));
+  const end = Math.min(palette.length - 1, start + 1);
+  const color = new THREE.Color(palette[start]).lerp(new THREE.Color(palette[end]), position - start);
+  return `#${color.getHexString()}`;
+}
+
+function cssColorToRgb(color: string): [number, number, number] {
+  const parsed = new THREE.Color(color).convertLinearToSRGB();
+  return [
+    Math.round(parsed.r * 255),
+    Math.round(parsed.g * 255),
+    Math.round(parsed.b * 255),
+  ];
+}
+
+function rgbToCss(color: readonly [number, number, number]): string {
+  return `rgb(${color[0]}, ${color[1]}, ${color[2]})`;
+}
+
+function mixRgb(
+  from: readonly [number, number, number],
+  to: readonly [number, number, number],
+  amount: number,
+): [number, number, number] {
+  const t = clamp(amount, 0, 1);
+  return [
+    Math.round(from[0] + (to[0] - from[0]) * t),
+    Math.round(from[1] + (to[1] - from[1]) * t),
+    Math.round(from[2] + (to[2] - from[2]) * t),
+  ];
+}
+
+function initialLabelFilterState(labels: LabelSchema): LabelFilterState {
+  let state = createLabelFilterState();
+  for (const [key, definition] of Object.entries(labels)) {
+    if (definition.hidden) {
+      state = setLabelHidden(state, key, true);
+    }
+  }
+  return state;
+}
+
+function vectorFromWorldPoint(point: readonly [number, number, number]): THREE.Vector3 {
+  return new THREE.Vector3(point[0], point[1], point[2]);
+}
+
+function optionalFiniteNumber(value: string): number | null {
+  if (!value.trim()) {
+    return null;
+  }
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : null;
+}
+
+function formatCompactNumber(value: number): string {
+  return Number.isInteger(value) ? value.toLocaleString() : Number(value.toPrecision(6)).toString();
+}
+
+function capitalize(value: string): string {
+  return value.length ? `${value[0].toUpperCase()}${value.slice(1)}` : value;
+}
+
+function sameGridPoint(
+  left: readonly [number, number, number] | null,
+  right: readonly [number, number, number] | null,
+): boolean {
+  return left !== null && right !== null && left[0] === right[0] && left[1] === right[1] && left[2] === right[2];
+}
+
+function gridToFieldSlicePixel(
+  axis: SliceAxis,
+  point: readonly [number, number, number],
+  height: number,
+): [number, number] {
+  if (axis === "x") {
+    return [point[2], height - 1 - point[1]];
+  }
+  if (axis === "y") {
+    return [point[0], height - 1 - point[2]];
+  }
+  return [point[0], height - 1 - point[1]];
 }
 
 function axisToIndex(axis: SliceAxis): 0 | 1 | 2 {

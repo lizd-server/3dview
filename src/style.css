@@ -188,11 +188,19 @@ select {
 }
 
 .electron-app .toolbar-item[data-tool="folder"]::before,
+.electron-app .toolbar-item[data-tool="field"]::before,
 .electron-app .toolbar-item[data-tool="mesh"]::before,
 .electron-app .toolbar-item[data-tool="vxz"]::before {
   border: 1.4px solid currentcolor;
   border-radius: 2px;
   box-shadow: 3px -3px 0 -2px currentcolor;
+}
+
+.electron-app .toolbar-item[data-tool="field"]::before {
+  border-radius: 50%;
+  box-shadow:
+    0 0 0 2px rgb(255 255 255 / 72%) inset,
+    3px -3px 0 -2px currentcolor;
 }
 
 .electron-app .toolbar-item[data-tool="mesh"]::before {
@@ -513,11 +521,139 @@ select {
   grid-template-columns: repeat(2, minmax(210px, 1fr));
   gap: 10px 12px;
   width: min(600px, calc(100vw - 32px));
+  max-height: min(720px, calc(100vh - 84px));
+  overflow: auto;
   padding: 12px;
   border: 1px solid #cbd5e1;
   border-radius: 8px;
   background: #ffffff;
   box-shadow: 0 16px 42px rgb(15 23 42 / 18%);
+}
+
+.field-options {
+  display: grid;
+  grid-column: 1 / -1;
+  gap: 10px;
+  min-width: 0;
+  padding-top: 11px;
+  border-top: 1px solid #d8e1ec;
+}
+
+.field-options-heading {
+  display: grid;
+  grid-template-columns: minmax(180px, auto) minmax(0, 1fr);
+  align-items: start;
+  gap: 6px 14px;
+  min-width: 0;
+}
+
+.field-options-heading > div {
+  min-width: 0;
+}
+
+.field-options-kicker {
+  display: block;
+  color: #64748b;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  line-height: 1.2;
+  text-transform: uppercase;
+}
+
+.field-options-heading strong {
+  display: block;
+  margin-top: 2px;
+  color: #243043;
+  font-size: 13px;
+  line-height: 1.3;
+}
+
+.field-metadata-summary {
+  align-self: center;
+  min-width: 0;
+  margin: 0;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.field-options-grid,
+.continuous-options {
+  display: grid;
+  gap: 9px 10px;
+  min-width: 0;
+}
+
+.field-options-grid > .hidden {
+  display: none;
+}
+
+.field-matrix-control {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.field-matrix-control span {
+  color: #526174;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.field-matrix-control textarea {
+  width: 100%;
+  min-height: 58px;
+  resize: vertical;
+  padding: 7px 8px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #1f2937;
+  font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.field-options-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.continuous-options {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  padding: 10px;
+  border: 1px solid #d9e1ea;
+  border-radius: 7px;
+  background: #f8fafc;
+}
+
+.field-options .select-control,
+.field-options .number-control {
+  display: grid;
+  align-items: stretch;
+  gap: 4px;
+  width: 100%;
+}
+
+.field-options .select-control.hidden {
+  display: none;
+}
+
+.field-options .select-control span,
+.field-options .number-control span {
+  line-height: 1.2;
+}
+
+.field-options .number-control input {
+  width: 100%;
+  font-variant-numeric: tabular-nums;
+}
+
+.field-coordinate-control {
+  grid-column: span 2;
+}
+
+.continuous-contour-control {
+  min-height: 30px;
 }
 
 .remote-browser {
@@ -902,7 +1038,7 @@ select {
 
 .slice-pane {
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto auto;
+  grid-template-rows: auto minmax(0, 1fr) auto auto auto;
   overflow: hidden;
 }
 
@@ -1061,7 +1197,7 @@ select {
 }
 
 .electron-app .slice-pane.empty-state .slice-canvas-shell::after {
-  content: "No volume selected\A Choose Folder or load\A a Remote pipeline folder";
+  content: "No field selected\A Choose Open field, Folder,\A or a Remote folder";
   max-width: 260px;
   color: #7a8797;
   font-size: 13px;
@@ -1074,6 +1210,11 @@ select {
   display: none;
 }
 
+.electron-app .slice-pane.empty-state .label-tools {
+  display: none;
+}
+
+.electron-app .slice-pane.empty-state .inspector-panel,
 .electron-app .slice-pane.empty-state .inspector-list {
   display: none;
 }
@@ -1141,6 +1282,39 @@ select {
   display: block;
 }
 
+.label-tools {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+  padding: 8px 14px;
+  border-top: 1px solid #d9e1ea;
+  background: #f8fafc;
+}
+
+.label-tools input {
+  min-width: 0;
+  flex: 1 1 auto;
+  padding: 6px 8px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  font: inherit;
+}
+
+.label-tools button,
+.legend-actions button {
+  padding: 4px 8px;
+  font-size: 11px;
+}
+
+.label-scope {
+  flex: 0 0 auto;
+  color: #64748b;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
 .legend-list {
   display: flex;
   flex-wrap: wrap;
@@ -1165,6 +1339,26 @@ select {
   min-width: 0;
   color: #334155;
   font-size: 13px;
+}
+
+.legend-row.filtered-out {
+  display: none;
+}
+
+.legend-row.label-hidden {
+  opacity: 0.52;
+}
+
+.legend-row.label-locked {
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: #eef2ff;
+  box-shadow: 0 0 0 1px #a5b4fc inset;
+}
+
+.legend-actions {
+  display: inline-flex;
+  gap: 4px;
 }
 
 .legend-label {
@@ -1195,13 +1389,42 @@ select {
   border-radius: 3px;
 }
 
+.inspector-panel {
+  border-top: 1px solid #d9e1ea;
+  background: #ffffff;
+}
+
+.inspector-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+  padding: 8px 14px 0;
+}
+
+.inspector-heading span {
+  min-width: 0;
+  overflow: hidden;
+  color: #697789;
+  font-size: 11px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.inspector-heading button {
+  flex: 0 0 auto;
+  padding: 4px 8px;
+  font-size: 11px;
+}
+
 .inspector-list {
   display: grid;
   grid-template-columns: 64px minmax(0, 1fr);
   gap: 5px 10px;
   margin: 0;
   padding: 10px 14px 12px;
-  border-top: 1px solid #d9e1ea;
   background: #ffffff;
   font-size: 13px;
 }
@@ -1283,5 +1506,25 @@ select {
 
   .options-grid {
     grid-template-columns: 1fr;
+  }
+
+  .field-options-heading,
+  .field-options-grid,
+  .continuous-options {
+    grid-template-columns: 1fr;
+  }
+
+  .field-coordinate-control {
+    grid-column: auto;
+  }
+
+  .inspector-heading {
+    align-items: flex-start;
+  }
+
+  .inspector-heading span {
+    overflow: visible;
+    text-overflow: clip;
+    white-space: normal;
   }
 }

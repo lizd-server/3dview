@@ -111,7 +111,6 @@ interface ElectronVxzOpenRequest {
 interface ElectronFieldOpenFile {
   requestId: string;
   name: string;
-  webkitRelativePath: string;
   size: number;
 }
 
@@ -142,8 +141,6 @@ const DOT_MARGIN = 3;
 const DOT_BACKGROUND: [number, number, number] = [238, 242, 247];
 const NO_DATA_COLOR: [number, number, number] = [148, 163, 184];
 const URL_PARAMS = new URLSearchParams(window.location.search);
-const IS_ELECTRON_APP = URL_PARAMS.has("electron");
-const ELECTRON_PLATFORM = URL_PARAMS.get("platform");
 const REMOTE_API_BASE = URL_PARAMS.get("apiBase") ?? "http://127.0.0.1:5175/api/remote";
 const VXZ_API_BASE = (() => {
   const value = new URL(REMOTE_API_BASE, window.location.href);
@@ -179,9 +176,9 @@ const VXZ_FALLBACK_CASES: Array<{
   { color: [225, 29, 72], cssColor: "#e11d48", label: "3 · Voxel corner" },
 ];
 
-if (IS_ELECTRON_APP) {
+if (URL_PARAMS.has("electron")) {
   document.documentElement.classList.add("electron-app");
-  if (ELECTRON_PLATFORM === "win32") {
+  if (URL_PARAMS.get("platform") === "win32") {
     document.documentElement.classList.add("windows-app");
   }
 }
@@ -1729,19 +1726,7 @@ class MeshSliceViewer {
     });
   }
 
-  private async loadOpenedVxz(
-    sourceName: string,
-    job: VxzJobResponse,
-    sourceToken?: number,
-  ): Promise<void> {
-    await this.loadVxzSource(sourceName, `Opening VXZ ${sourceName}`, async () => job, sourceToken);
-  }
-
   private async openAssociatedField(request: ElectronFieldOpenRequest): Promise<void> {
-    const bridge = window.voxelMeshViewer;
-    if (!bridge) {
-      throw new Error("Electron field bridge is unavailable");
-    }
     try {
       if (request.error) {
         throw new Error(`Could not open ${request.sourceName}: ${request.error}`);
@@ -1752,12 +1737,11 @@ class MeshSliceViewer {
       const files = request.files.map((file) => new ElectronFileHandle(
         file.requestId,
         file.name,
-        file.webkitRelativePath,
         file.size,
       ));
       await this.loadPipelineFolder(files, request.sourceName, { replaceMeshes: false });
     } finally {
-      bridge.completeFieldOpen(request.requestId);
+      window.voxelMeshViewer?.completeFieldOpen(request.requestId);
     }
   }
 
@@ -1777,7 +1761,12 @@ class MeshSliceViewer {
     if (sourceToken !== this.sourceLoadToken) {
       throw new DOMException("Superseded VXZ load", "AbortError");
     }
-    await this.loadOpenedVxz(request.sourceName, job, sourceToken);
+    await this.loadVxzSource(
+      request.sourceName,
+      `Opening VXZ ${request.sourceName}`,
+      async () => job,
+      sourceToken,
+    );
   }
 
   private async initializeElectronFileBridge(): Promise<void> {
@@ -1867,10 +1856,11 @@ class MeshSliceViewer {
         throw new DOMException("Superseded VXZ load", "AbortError");
       }
 
+      const jobMetadata = job.metadata;
       this.vxzJobId = job.id;
-      this.vxzMetadata = job.metadata;
-      this.vxzFallbackColorOption.disabled = !job.metadata.hasOvoxelType;
-      this.vxzQefRankColorOption.disabled = !job.metadata.hasQefRank;
+      this.vxzMetadata = jobMetadata;
+      this.vxzFallbackColorOption.disabled = !jobMetadata.hasOvoxelType;
+      this.vxzQefRankColorOption.disabled = !jobMetadata.hasQefRank;
       if (
         (this.vxzFallbackColorOption.disabled && this.vxzColorMode.value === "fallback")
         || (this.vxzQefRankColorOption.disabled && this.vxzColorMode.value === "rank")
@@ -1884,18 +1874,19 @@ class MeshSliceViewer {
       this.voxelRoot.visible = false;
       this.sliceRenderMode.value = "pixels";
       this.sliceRenderMode.disabled = true;
+      const dataUrl = (kind: "voxels" | "mesh") => vxzDataUrl(
+        VXZ_API_BASE,
+        job.id,
+        kind,
+        jobMetadata.formatVersion,
+        jobMetadata.cacheVersion,
+      );
 
       if (loadTaskId !== null) {
         this.setLoadProgress(loadTaskId, "Loading voxel preview", { loaded: 0, total: 2 });
       }
       const voxelResponse = await fetch(
-        vxzDataUrl(
-          VXZ_API_BASE,
-          job.id,
-          "voxels",
-          job.metadata.formatVersion,
-          job.metadata.cacheVersion,
-        ),
+        dataUrl("voxels"),
         { signal: controller.signal },
       );
       if (!voxelResponse.ok) {
@@ -1914,13 +1905,7 @@ class MeshSliceViewer {
         this.setLoadProgress(loadTaskId, "Loading mesh preview", { loaded: 1, total: 2 });
       }
       const meshResponse = await fetch(
-        vxzDataUrl(
-          VXZ_API_BASE,
-          job.id,
-          "mesh",
-          job.metadata.formatVersion,
-          job.metadata.cacheVersion,
-        ),
+        dataUrl("mesh"),
         { signal: controller.signal },
       );
       if (!meshResponse.ok) {
@@ -4019,7 +4004,6 @@ class ElectronFileHandle implements SourceFile {
   constructor(
     private readonly requestId: string,
     readonly name: string,
-    readonly webkitRelativePath: string,
     private readonly size: number,
   ) {}
 
@@ -4031,38 +4015,13 @@ class ElectronFileHandle implements SourceFile {
       throw new Error(await responseError(response));
     }
 
-    if (!response.body) {
-      const buffer = await response.arrayBuffer();
-      this.verifySize(buffer.byteLength);
-      onProgress?.({ loaded: buffer.byteLength, total: this.size });
-      return buffer;
-    }
-
-    const reader = response.body.getReader();
-    const chunks: Uint8Array[] = [];
-    let loaded = 0;
-    while (true) {
-      if (signal?.aborted) {
-        await reader.cancel();
-        throw new DOMException("The operation was aborted.", "AbortError");
-      }
-      const result = await reader.read();
-      if (result.done) {
-        break;
-      }
-      chunks.push(result.value);
-      loaded += result.value.byteLength;
-      onProgress?.({ loaded, total: this.size });
-    }
-
-    this.verifySize(loaded);
-    const bytes = new Uint8Array(loaded);
-    let offset = 0;
-    for (const chunk of chunks) {
-      bytes.set(chunk, offset);
-      offset += chunk.byteLength;
-    }
-    return bytes.buffer;
+    const buffer = await readResponseArrayBuffer(
+      response,
+      signal,
+      (loaded) => onProgress?.({ loaded, total: this.size }),
+    );
+    this.verifySize(buffer.byteLength);
+    return buffer;
   }
 
   async text(onProgress?: ProgressCallback, signal?: AbortSignal): Promise<string> {
@@ -4166,49 +4125,51 @@ class RemoteFileHandle implements SourceFile {
       throw new Error(await response.text());
     }
 
-    if (!response.body) {
-      const buffer = await response.arrayBuffer();
-      if (signal?.aborted) {
-        throw new DOMException("The operation was aborted.", "AbortError");
-      }
-      entry.loaded = buffer.byteLength;
-      entry.total = entry.total ?? buffer.byteLength;
-      notifyRemoteFileDownloadProgress(entry);
-      return buffer;
-    }
-
-    const reader = response.body.getReader();
-    const chunks: Uint8Array[] = [];
-    let loaded = 0;
-
-    while (true) {
-      if (signal?.aborted) {
-        throw new DOMException("The operation was aborted.", "AbortError");
-      }
-
-      const result = await reader.read();
-      if (result.done) {
-        break;
-      }
-
-      chunks.push(result.value);
-      loaded += result.value.byteLength;
+    return readResponseArrayBuffer(response, signal, (loaded) => {
       entry.loaded = loaded;
+      entry.total = entry.total ?? loaded;
       notifyRemoteFileDownloadProgress(entry);
-    }
-
-    const bytes = new Uint8Array(loaded);
-    let offset = 0;
-    for (const chunk of chunks) {
-      bytes.set(chunk, offset);
-      offset += chunk.byteLength;
-    }
-    return bytes.buffer;
+    });
   }
 
   async text(onProgress?: ProgressCallback, signal?: AbortSignal): Promise<string> {
     return new TextDecoder().decode(await this.arrayBuffer(onProgress, signal));
   }
+}
+
+async function readResponseArrayBuffer(
+  response: Response,
+  signal: AbortSignal | undefined,
+  onProgress: (loaded: number) => void,
+): Promise<ArrayBuffer> {
+  if (!response.body) {
+    const buffer = await response.arrayBuffer();
+    signal?.throwIfAborted();
+    onProgress(buffer.byteLength);
+    return buffer;
+  }
+
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let loaded = 0;
+  while (true) {
+    signal?.throwIfAborted();
+    const result = await reader.read();
+    if (result.done) {
+      break;
+    }
+    chunks.push(result.value);
+    loaded += result.value.byteLength;
+    onProgress(loaded);
+  }
+
+  const bytes = new Uint8Array(loaded);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes.buffer;
 }
 
 function notifyRemoteFileDownloadProgress(entry: RemoteFileDownloadEntry): void {

@@ -15,19 +15,6 @@ The dev command starts:
 - frontend: `http://127.0.0.1:5173/`
 - local remote-file backend: `http://127.0.0.1:5175/`
 
-For a persistent local service managed by pm2:
-
-```bash
-npm run pm2:start
-pm2 save
-```
-
-Useful pm2 commands:
-
-- `pm2 status`
-- `npm run pm2:logs`
-- `npm run pm2:stop`
-
 For a production build:
 
 ```bash
@@ -121,11 +108,13 @@ one O-Voxel grid cell. Pointer inspection reports that pixel's exact integer
 grid coordinate, world-space cell center, dual vertex, signed-edge bits, and
 fallback case and QEF rank/deficiency when available.
 
-Decoded previews and exact sparse attributes are cached by VXZ SHA-256 under
-`~/Library/Caches/voxel-mesh-viewer/vxz`, so opening the same file again avoids
-rebuilding topology. Preparations are serialized through one worker because a
-full-resolution VXZ can use substantial memory; slice requests remain
-on-demand and replace older requests for the same file.
+Decoded previews and exact sparse attributes are cached by VXZ SHA-256 in the
+viewer cache directory. The standalone backend defaults to
+`~/Library/Caches/voxel-mesh-viewer/vxz`; the desktop app uses its system app
+cache. Opening the same file again avoids rebuilding topology. Preparations are
+serialized through one worker because a full-resolution VXZ can use substantial
+memory; slice requests remain on-demand and replace older requests for the same
+file.
 
 ## macOS App
 
@@ -185,16 +174,69 @@ Remote browsing uses `ssh.exe` from the Windows OpenSSH Client; set
 This build is not Authenticode-signed, so Windows SmartScreen may ask for
 confirmation on its first launch.
 
-## Input Folder
+## Expected `.npy` input
 
-Use the Folder input to select a directory. Every supported three-dimensional
-`.npy` file is available as a field; filenames do not have to follow the
-floodfill pipeline convention.
+Use the Folder input to open a dataset directory. Every supported
+three-dimensional `.npy` file appears as a field, and filenames may be
+arbitrary. A field must have exactly three non-empty dimensions; non-cubic
+shapes are supported.
 
-### Generic `.npy` fields (Phase 1)
+Supported arrays:
 
-A folder can include an optional `fields.json` beside its arrays. `defaults`
-apply to every field, and entries under `fields` override them by filename:
+- NumPy format versions 1, 2, and 3
+- `bool`
+- `int8`, `int16`, `int32`, and `int64`
+- `uint8`, `uint16`, `uint32`, and `uint64`
+- `float16`, `float32`, and `float64`
+- Little-endian or big-endian data
+- C-order or Fortran-order storage
+
+The viewer rejects `.npz` archives, rank-2 images, rank-4 batch or channel
+arrays, and object, string, structured, complex, or pickled arrays.
+
+A typical dataset looks like this:
+
+```text
+run-0042/
+  fields.json
+  labels.npy
+  sdf.npy
+  input_mesh.ply
+```
+
+For the common NumPy layout below, source dimensions are ordered Z, Y, X:
+
+```python
+labels = np.zeros((nz, ny, nx), dtype=np.uint16)
+sdf = np.zeros((nz, ny, nx), dtype=np.float32)
+
+np.save("labels.npy", labels, allow_pickle=False)
+np.save("sdf.npy", sdf, allow_pickle=False)
+```
+
+Set `"axisOrder": "zyx"` in `fields.json` for these arrays. The viewer then
+exposes source shape `[nz, ny, nx]` as logical XYZ shape `[nx, ny, nz]`.
+
+### Categorical and continuous fields
+
+The dtype suggests a default, but does not determine what a field means:
+
+| Semantic | Use for | Recommended dtype |
+| --- | --- | --- |
+| `categorical` | Labels, masks, component IDs, part IDs, algorithm cases | Integer or boolean |
+| `continuous` | SDF, distance, confidence, probability, error | Floating point |
+
+Categorical values are identities. Label `103` is not greater or stronger than
+label `7`, and the viewer does not interpolate between label IDs. Continuous
+values are magnitudes and can use ranges, color scales, contours, and
+isovalues. Declare `semantic` explicitly whenever possible. Signed and
+unsigned 64-bit categorical IDs remain exact, including values above
+JavaScript's safe integer range.
+
+### Minimal `fields.json`
+
+Place `fields.json` beside the arrays. `defaults` applies to every field, while
+an entry under `fields` overrides those defaults for one exact filename:
 
 ```json
 {
@@ -205,14 +247,9 @@ apply to every field, and entries under `fields` override them by filename:
     "coordinatePreset": "index"
   },
   "fields": {
-    "component_id.npy": {
+    "labels.npy": {
       "semantic": "categorical",
-      "categoricalPreset": "instances",
-      "validity": {
-        "noDataValues": ["-1"],
-        "description": "-1 was not evaluated"
-      },
-      "sparseDefault": "0",
+      "categoricalPreset": "semantic",
       "labels": {
         "0": {
           "name": "background",
@@ -220,58 +257,54 @@ apply to every field, and entries under `fields` override them by filename:
           "background": true,
           "hidden": true
         },
-        "9007199254740993": {
-          "name": "part A",
-          "color": "#2563eb",
-          "group": "parts"
+        "1": {
+          "name": "object",
+          "color": "#2563eb"
         }
       }
     },
     "sdf.npy": {
       "semantic": "continuous",
-      "association": "point",
-      "indexToWorld": [
-        0.01, 0, 0, -1,
-        0, 0.01, 0, -1,
-        0, 0, 0.01, -1,
-        0, 0, 0, 1
-      ]
+      "continuousStyle": {
+        "range": null
+      }
     }
   }
 }
 ```
 
-- `semantic` is `categorical` for identities such as labels, components, and
-  cases, or `continuous` for quantities such as SDF, confidence, and error.
-- `categoricalPreset` is `semantic` for a small named label set or `instances`
-  for many component/instance IDs. It changes display behavior, not stored IDs.
-- `axisOrder` describes source-array dimensions in order. For example, `"zyx"`
-  means source shape `[Z, Y, X]`, which is exposed to the viewer as logical
-  shape `[X, Y, Z]`. An array may also use `["z", "y", "x"]`.
-- `association` is `point` when values live on grid nodes or `cell` when values
-  live at cell centers.
-- `coordinatePreset` is `index` for index-space coordinates or `normalized`
-  for a grid domain spanning `[-1, 1]` on each axis. For a custom mapping,
-  `indexToWorld` is a row-major affine 4 x 4 matrix multiplying
-  `[x, y, z, 1]`; it takes precedence over `coordinatePreset`.
-- `labels` is keyed by the exact decimal label ID. Each entry may define
-  `name`, six-digit hex `color`, `group`, `background`, and initial `hidden`
-  state. No particular ID, including `0`, is assumed to be background.
-- `validity.noDataValues` lists exact value keys that mean missing or invalid
-  data. `sparseDefault` records the value supplied for absent sparse samples;
-  neither is implicitly treated as background or as an unloaded region. No-data
-  samples use a neutral color and are excluded from label counts, automatic
-  continuous ranges, and contour interpolation.
-- `continuousStyle.range` accepts two increasing numbers. Set it to `null`, or
-  clear both range fields in the viewer, to calculate the display range from
-  valid field samples.
+The main metadata keys are:
 
-Without metadata, a generic field uses `axisOrder: "xyz"`, point association,
-index coordinates, and the `semantic` categorical preset. Integer and boolean
-dtypes are suggested as categorical, while floating-point dtypes are suggested
-as continuous; explicit metadata can override that suggestion. Signed and
-unsigned 64-bit integer values remain exact, including IDs above JavaScript's
-safe integer range, and are not converted through floating point.
+- `axisOrder`: logical axis represented by each NumPy dimension. Use `"zyx"`
+  for `[Z, Y, X]` and `"xyz"` for `[X, Y, Z]`.
+- `association`: `"point"` for grid-node samples or `"cell"` for cell-center
+  samples.
+- `coordinatePreset`: `"index"` for index-space coordinates or `"normalized"`
+  when the complete grid domain really spans `[-1, 1]`.
+- `indexToWorld`: optional row-major affine 4 x 4 matrix applied to logical
+  `[x, y, z, 1]`. Use it for physical, translated, rotated, or anisotropic
+  grids. It takes precedence over `coordinatePreset`.
+- `labels`: names, colors, groups, and initial visibility keyed by the exact
+  categorical value. No ID, including `0`, is assumed to be background.
+- `validity.noDataValues`: exact values that mean missing or invalid data.
+- `sparseDefault`: value used for absent samples in the original sparse data.
+- `continuousStyle.range`: two increasing values, or `null` to calculate the
+  display range from valid samples.
+
+Quote integer IDs in JSON when they may exceed `9007199254740991`, for example
+`"9007199254740993"`.
+
+Without `fields.json`, the viewer uses `axisOrder: "xyz"`, point association,
+and index coordinates. Integer and boolean dtypes are suggested as categorical;
+floating-point dtypes are suggested as continuous. Metadata and the in-app
+controls can override these defaults.
+
+The selected dense field is loaded in full. A `1024 x 1024 x 1024` `uint32`
+array is 4 GiB before parsing, caching, and GPU use.
+
+See the [Data Producer Guide](docs/DATA_PRODUCER_GUIDE.md) for the complete
+metadata schema, coordinate conventions, mesh alignment rules, no-data values,
+atomic output pattern, and a copyable Python exporter.
 
 ### Legacy pipeline presets
 

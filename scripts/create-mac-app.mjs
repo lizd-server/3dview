@@ -19,7 +19,8 @@ const dockIconPath = path.join(projectDir, "assets", "app-icon.png");
 const arch = process.arch === "arm64" ? "arm64" : "x64";
 const appDir = path.join(outDir, `${appName}-darwin-${arch}`, `${appName}.app`);
 const installDir = path.join(process.env.HOME ?? "", "Applications", `${appName}.app`);
-const vxzRuntimeDir = path.join(projectDir, ".vxz-runtime-build");
+const vxzRuntimeBuildDir = path.join(projectDir, ".vxz-runtime-build");
+const vxzRuntimeDir = path.join(vxzRuntimeBuildDir, "vxz-runtime");
 const venvPython = path.join(projectDir, ".venv-vxz", "bin", "python");
 const venvSitePackages = path.join(projectDir, ".venv-vxz", "lib", "python3.11", "site-packages");
 const vxzWorkerScript = path.join(projectDir, "vxz_worker.py");
@@ -54,14 +55,16 @@ try {
     `--extra-resource=${vxzRuntimeDir}`,
     `--executable-name=${appName}`,
     "--ignore=^/dist-mac($|/)",
+    "--ignore=^/dist-win($|/)",
     "--ignore=^/\\.git($|/)",
     "--ignore=^/\\.logs($|/)",
     "--ignore=^/\\.venv-vxz($|/)",
     "--ignore=^/\\.vxz-runtime-build($|/)",
+    "--ignore=^/\\.windows-runtime-cache($|/)",
     "--ignore=^/node_modules/electron/dist($|/)",
   ], { env: { ...process.env, npm_config_yes: "true" } });
 } finally {
-  await rm(vxzRuntimeDir, { recursive: true, force: true });
+  await rm(vxzRuntimeBuildDir, { recursive: true, force: true });
 }
 
 applyBundleIcon(appDir);
@@ -80,7 +83,7 @@ console.log(`Installed ${installDir}`);
 async function prepareVxzRuntime() {
   const pythonExecutable = await realpath(venvPython);
   const pythonHome = path.resolve(path.dirname(pythonExecutable), "..");
-  await rm(vxzRuntimeDir, { recursive: true, force: true });
+  await rm(vxzRuntimeBuildDir, { recursive: true, force: true });
   await mkdir(vxzRuntimeDir, { recursive: true });
   const runtimePythonHome = path.join(vxzRuntimeDir, "python");
   await cp(pythonHome, runtimePythonHome, { recursive: true });

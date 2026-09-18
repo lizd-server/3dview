@@ -12,7 +12,7 @@ import sys
 import time
 import uuid
 from pathlib import Path
-from typing import Literal, Sequence
+from typing import Literal
 
 import numpy as np
 from numpy.typing import NDArray
@@ -37,36 +37,6 @@ VOXEL_RECORD_DTYPE = np.dtype(
     ],
     align=False,
 )
-
-
-def slice_pixel_to_grid(
-    axis: Axis, index: int, px: int, py: int, resolution: int
-) -> tuple[int, int, int]:
-    inverted = resolution - 1 - py
-    if axis == "x":
-        return index, inverted, px
-    if axis == "y":
-        return px, index, inverted
-    return px, inverted, index
-
-
-def grid_to_slice_pixel(
-    axis: Axis, coord: Sequence[int], resolution: int
-) -> tuple[int, int]:
-    x, y, z = (int(value) for value in coord)
-    if axis == "x":
-        return z, resolution - 1 - y
-    if axis == "y":
-        return x, resolution - 1 - z
-    return x, resolution - 1 - y
-
-
-def voxel_world_centers(coords: NDArray[np.integer], resolution: int) -> NDArray[np.float32]:
-    centers = coords.astype(np.float32)
-    centers += np.float32(0.5)
-    centers /= np.float32(resolution)
-    centers -= np.float32(0.5)
-    return centers
 
 
 def dual_world_vertices(

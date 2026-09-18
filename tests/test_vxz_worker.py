@@ -7,39 +7,6 @@ import vxz_worker
 
 
 class SliceGridMappingTests(unittest.TestCase):
-    def test_pixel_to_grid_matches_cell_contract(self):
-        resolution = 8
-        self.assertEqual(
-            vxz_worker.slice_pixel_to_grid("x", 3, 5, 2, resolution),
-            (3, 5, 5),
-        )
-        self.assertEqual(
-            vxz_worker.slice_pixel_to_grid("y", 3, 5, 2, resolution),
-            (5, 3, 5),
-        )
-        self.assertEqual(
-            vxz_worker.slice_pixel_to_grid("z", 3, 5, 2, resolution),
-            (5, 5, 3),
-        )
-
-    def test_grid_pixel_round_trip_for_every_axis(self):
-        resolution = 8
-        coords = (2, 5, 6)
-        for axis, index in (("x", 2), ("y", 5), ("z", 6)):
-            pixel = vxz_worker.grid_to_slice_pixel(axis, coords, resolution)
-            self.assertEqual(
-                vxz_worker.slice_pixel_to_grid(axis, index, *pixel, resolution),
-                coords,
-            )
-
-    def test_voxel_center_is_cell_centered(self):
-        np.testing.assert_allclose(
-            vxz_worker.voxel_world_centers(
-                np.array([[0, 0, 0], [7, 7, 7]], dtype=np.int32), 8
-            ),
-            np.array([[-0.4375] * 3, [0.4375] * 3], dtype=np.float32),
-        )
-
     def test_explicit_resolution_preserves_empty_boundary_cells(self):
         coords = np.array([[2, 3, 4], [7, 6, 5]], dtype=np.int32)
         self.assertEqual(vxz_worker.resolve_grid_resolution(coords, None), (8, "inferred"))

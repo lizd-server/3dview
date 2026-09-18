@@ -43,7 +43,7 @@ export function sourceShapeToLogicalShape(
   return logicalShape;
 }
 
-export function logicalToSourceIndex(
+function logicalToSourceIndex(
   logicalIndex: Index3,
   sourceAxisOrder: SourceAxisOrder,
 ): [number, number, number] {
@@ -51,19 +51,7 @@ export function logicalToSourceIndex(
   return sourceAxisOrder.map((axis) => logicalIndex[logicalAxisIndex(axis)]) as [number, number, number];
 }
 
-export function sourceToLogicalIndex(
-  sourceIndex: Index3,
-  sourceAxisOrder: SourceAxisOrder,
-): [number, number, number] {
-  assertSourceAxisOrder(sourceAxisOrder);
-  const logicalIndex: [number, number, number] = [0, 0, 0];
-  for (let sourceAxis = 0; sourceAxis < 3; sourceAxis += 1) {
-    logicalIndex[logicalAxisIndex(sourceAxisOrder[sourceAxis])] = sourceIndex[sourceAxis];
-  }
-  return logicalIndex;
-}
-
-export function sourceLinearOffset(
+function sourceLinearOffset(
   sourceIndex: Index3,
   sourceShape: Shape3,
   fortranOrder: boolean,

@@ -1,18 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { type NpyArray3D } from "../src/field-model.ts";
 import {
   computeTransformedSlicePlaneFrame,
   formatIndexToWorldText,
   createPresetIndexToWorld,
-  logicalToSourceIndex,
   parseIndexToWorldText,
-  sampleNpyValue,
   sliceCoordinatesToLogicalIndex,
   slicePixelToLogicalIndex,
-  sourceLinearOffset,
-  sourceShapeToLogicalShape,
   transformIndexToWorld,
 } from "../src/grid-field.ts";
 
@@ -27,36 +22,6 @@ test("custom matrix text round-trips without locale grouping or precision loss",
 
   assert.equal(formatted.includes("1,000"), false);
   assert.deepEqual(parseIndexToWorldText(formatted), matrix);
-});
-
-test("samples a C-order ZYX source through logical XYZ indices", () => {
-  const data = new Int32Array(2 * 3 * 4);
-  for (let z = 0; z < 2; z += 1) {
-    for (let y = 0; y < 3; y += 1) {
-      for (let x = 0; x < 4; x += 1) {
-        data[sourceLinearOffset([z, y, x], [2, 3, 4], false)] = 100 * z + 10 * y + x;
-      }
-    }
-  }
-  const array = npyArray([2, 3, 4], data, false);
-
-  assert.deepEqual(sourceShapeToLogicalShape(array.sourceShape, ["z", "y", "x"]), [4, 3, 2]);
-  assert.deepEqual(logicalToSourceIndex([3, 2, 1], ["z", "y", "x"]), [1, 2, 3]);
-  assert.equal(sampleNpyValue(array, [3, 2, 1], ["z", "y", "x"]), 123);
-});
-
-test("samples a Fortran-order XYZ source", () => {
-  const shape: [number, number, number] = [4, 3, 2];
-  const data = new Int32Array(24);
-  for (let x = 0; x < 4; x += 1) {
-    for (let y = 0; y < 3; y += 1) {
-      for (let z = 0; z < 2; z += 1) {
-        data[sourceLinearOffset([x, y, z], shape, true)] = 100 * x + 10 * y + z;
-      }
-    }
-  }
-
-  assert.equal(sampleNpyValue(npyArray(shape, data, true), [3, 2, 1], ["x", "y", "z"]), 321);
 });
 
 test("keeps provider slice coordinates separate from canvas row inversion", () => {
@@ -186,12 +151,4 @@ function cross(first: readonly number[], second: readonly number[]): [number, nu
     first[2] * second[0] - first[0] * second[2],
     first[0] * second[1] - first[1] * second[0],
   ];
-}
-
-function npyArray(
-  sourceShape: [number, number, number],
-  data: Int32Array,
-  fortranOrder: boolean,
-): NpyArray3D {
-  return { name: "field.npy", sourceShape, data, dtype: "<i4", fortranOrder, warnings: [] };
 }

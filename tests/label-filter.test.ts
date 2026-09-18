@@ -1,36 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { fieldValueKey } from "../src/field-model.ts";
 import {
   createLabelFilterState,
   isLabelHighlighted,
   isLabelVisible,
   isolateLabel,
-  labelKeyForValue,
   labelMatchesQuery,
   lockLabelHighlight,
   setLabelHidden,
   setLabelQuery,
-  toggleLabelHidden,
 } from "../src/label-filter.ts";
-
-test("uses exact field value keys for large integer label identities", () => {
-  const first = 9_007_199_254_740_993n;
-  const second = 9_007_199_254_740_995n;
-  const firstKey = labelKeyForValue(first);
-  const secondKey = labelKeyForValue(second);
-
-  assert.equal(firstKey, fieldValueKey(first));
-  assert.equal(secondKey, fieldValueKey(second));
-  assert.notEqual(firstKey, secondKey);
-
-  const initial = createLabelFilterState();
-  const hidden = setLabelHidden(initial, firstKey, true);
-  assert.equal(hidden.hiddenLabelKeys.has(firstKey), true);
-  assert.equal(hidden.hiddenLabelKeys.has(secondKey), false);
-  assert.equal(initial.hiddenLabelKeys.size, 0);
-});
 
 test("matches case-insensitive query terms across label ID, name, and group", () => {
   const definition = { name: "Left Femur", group: "Lower Limb" };
@@ -46,16 +26,15 @@ test("matches case-insensitive query terms across label ID, name, and group", ()
   assert.equal(queried.query, "femur");
 });
 
-test("hidden labels are invisible and toggling does not mutate prior state", () => {
+test("hidden labels are invisible without mutating prior state", () => {
   const initial = createLabelFilterState();
-  const hidden = toggleLabelHidden(initial, "7");
+  const hidden = setLabelHidden(initial, "7", true);
 
   assert.equal(isLabelVisible(initial, "7"), true);
   assert.equal(isLabelVisible(hidden, "7"), false);
   assert.equal(isLabelVisible(hidden, "8"), true);
-  assert.equal(isLabelVisible(initial, "9", { hidden: true }), false);
 
-  const shown = toggleLabelHidden(hidden, "7");
+  const shown = setLabelHidden(hidden, "7", false);
   assert.equal(isLabelVisible(shown, "7"), true);
   assert.equal(hidden.hiddenLabelKeys.has("7"), true);
 });

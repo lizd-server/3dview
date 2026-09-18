@@ -138,20 +138,6 @@ async function prepareWindowsVxzRuntime() {
   await Promise.all([
     cp(vxzWorkerScript, path.join(runtimeDir, "vxz_worker.py")),
     cp(vxzDecoderScript, path.join(runtimeDir, "decode_vxz.py")),
-    writeFile(
-      path.join(runtimeDir, "runtime.json"),
-      `${JSON.stringify({
-        platform: "win32",
-        arch: targetArch,
-        python: pythonVersion,
-        numpy: numpyVersion,
-        sources: {
-          python: { url: pythonArchive.url, sha256: pythonArchive.sha256 },
-          numpy: { url: numpyWheel.url, sha256: numpyWheel.sha256 },
-        },
-      }, null, 2)}\n`,
-      "utf8",
-    ),
   ]);
 }
 
@@ -208,7 +194,6 @@ async function verifyPortableApp() {
     access(path.join(resourcesDir, "app.asar")),
     access(path.join(runtimeRoot, "vxz_worker.py")),
     access(path.join(runtimeRoot, "decode_vxz.py")),
-    access(path.join(runtimeRoot, "runtime.json")),
   ]);
   const pth = await readFile(path.join(runtimeRoot, "python", "python313._pth"), "utf8");
   for (const requiredLine of ["..", "..\\site-packages", "import site"]) {

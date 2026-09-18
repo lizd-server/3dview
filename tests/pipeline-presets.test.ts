@@ -75,10 +75,7 @@ test("preserves legacy pipeline label classification and fixed colors", () => {
   assert.deepEqual(pipelineColorForValue(1, "pipelineLabels"), [37, 99, 235]);
   assert.deepEqual(pipelineColorForValue(2, "pipelineLabels"), [220, 38, 38]);
   assert.deepEqual(pipelineColorForValue(3, "pipelineLabels"), [250, 204, 21]);
-  assert.deepEqual(
-    pipelineColorForValue(4.75, "finalCclComponents"),
-    pipelineColorForValue(4, "finalCclComponents"),
-  );
+  assert.equal(classifyPipelineValue(4.75, "finalCclComponents"), null);
 });
 
 test("preserves scalar-field endpoint colors and exact bigint component identity", () => {

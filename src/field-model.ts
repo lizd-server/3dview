@@ -116,20 +116,12 @@ export interface ResolvedFieldDefinition {
   sparseDefault?: string;
   valueDescription?: string;
   stylePreset?: string;
-  presetId?: string;
 }
 
 export interface DenseField {
   array: NpyArray3D;
   definition: ResolvedFieldDefinition;
 }
-
-export const IDENTITY_INDEX_TO_WORLD: Matrix4 = [
-  1, 0, 0, 0,
-  0, 1, 0, 0,
-  0, 0, 1, 0,
-  0, 0, 0, 1,
-];
 
 export function fieldValueKey(value: FieldValue): string {
   if (typeof value === "bigint") {

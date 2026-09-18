@@ -1,6 +1,4 @@
 import {
-  fieldValueKey,
-  type FieldValue,
   type LabelDefinition,
 } from "./field-model.ts";
 
@@ -21,10 +19,6 @@ export function createLabelFilterState(): LabelFilterState {
     isolatedLabelKey: null,
     lockedHighlightKey: null,
   };
-}
-
-export function labelKeyForValue(value: FieldValue): LabelKey {
-  return fieldValueKey(value);
 }
 
 export function setLabelQuery(state: LabelFilterState, query: string): LabelFilterState {
@@ -68,10 +62,6 @@ export function setLabelHidden(
   return { ...state, hiddenLabelKeys };
 }
 
-export function toggleLabelHidden(state: LabelFilterState, key: LabelKey): LabelFilterState {
-  return setLabelHidden(state, key, !state.hiddenLabelKeys.has(key));
-}
-
 export function isolateLabel(state: LabelFilterState, key: LabelKey | null): LabelFilterState {
   if (state.isolatedLabelKey === key) {
     return state;
@@ -101,12 +91,11 @@ export function isLabelHighlighted(state: LabelFilterState, key: LabelKey): bool
 export function isLabelVisible(
   state: LabelFilterState,
   key: LabelKey,
-  definition?: Pick<LabelDefinition, "hidden">,
 ): boolean {
   if (state.isolatedLabelKey !== null) {
     return state.isolatedLabelKey === key;
   }
-  return definition?.hidden !== true && !state.hiddenLabelKeys.has(key);
+  return !state.hiddenLabelKeys.has(key);
 }
 
 function normalizedQueryTerms(query: string): string[] {

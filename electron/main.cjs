@@ -1,19 +1,13 @@
 const { app, BrowserWindow, dialog, ipcMain, nativeImage, shell } = require("electron");
-const { spawn } = require("node:child_process");
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const http = require("node:http");
 const path = require("node:path");
-const {
-  createRemoteHostPolicy,
-  REMOTE_HOST_ALLOWLIST_ENV,
-} = require("../server/remote-host-policy.cjs");
+const { createRemoteApi } = require("../server/remote-api.cjs");
 const { createVxzApi } = require("../server/vxz-api.cjs");
 
 const HOST = "127.0.0.1";
-const SSH_BIN = process.env.REMOTE_VIEWER_SSH_BIN
-  || (process.platform === "win32" ? "ssh.exe" : "/usr/bin/ssh");
-const remoteHostPolicy = createRemoteHostPolicy(process.env[REMOTE_HOST_ALLOWLIST_ENV]);
+const remoteApi = createRemoteApi();
 
 let mainWindow = null;
 let appServer = null;
@@ -46,18 +40,13 @@ if (!hasSingleInstanceLock) {
 
 app.on("second-instance", (_event, commandLine, workingDirectory) => {
   queueOpenFileArguments(commandLine, workingDirectory);
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    if (mainWindow.isMinimized()) {
-      mainWindow.restore();
-    }
-    mainWindow.show();
-    mainWindow.focus();
-  }
+  focusViewerWindow();
 });
 
 app.on("open-file", (event, filePath) => {
   event.preventDefault();
   queueOpenFilePath(filePath);
+  focusViewerWindow();
 });
 
 ipcMain.on("vxz:renderer-ready", (event) => {
@@ -103,9 +92,7 @@ if (hasSingleInstanceLock) {
     try {
       setRuntimeAppIcon();
       await loadVxzPreferences();
-      const url = await startAppServer();
-      appServerUrl = url;
-      createWindow(url);
+      createWindow(await startAppServer());
     } catch (error) {
       await showStartupError(error);
       app.quit();
@@ -115,12 +102,7 @@ if (hasSingleInstanceLock) {
 
 app.on("activate", () => {
   if (BrowserWindow.getAllWindows().length === 0) {
-    void startAppServer()
-      .then((url) => {
-        appServerUrl = url;
-        createWindow(url);
-      })
-      .catch((error) => showStartupError(error));
+    void startAppServer().then(createWindow).catch((error) => showStartupError(error));
   }
 });
 
@@ -136,11 +118,8 @@ app.on("before-quit", () => {
 });
 
 async function startAppServer() {
-  if (appServer) {
-    const address = appServer.address();
-    if (address && typeof address === "object") {
-      return `http://${HOST}:${address.port}/`;
-    }
+  if (appServerUrl) {
+    return appServerUrl;
   }
 
   const distDir = path.join(app.getAppPath(), "dist");
@@ -149,12 +128,9 @@ async function startAppServer() {
     throw new Error(`Missing built frontend at ${indexPath}. Run npm run build before packaging.`);
   }
 
-  const packagedVxzRuntime = path.join(process.resourcesPath, "vxz-runtime");
-  const vxzRuntimeRoot = app.isPackaged && fs.existsSync(packagedVxzRuntime)
-    ? packagedVxzRuntime
-    : app.isPackaged
-      ? path.join(process.resourcesPath, ".vxz-runtime-build")
-      : app.getAppPath();
+  const vxzRuntimeRoot = app.isPackaged
+    ? path.join(process.resourcesPath, "vxz-runtime")
+    : app.getAppPath();
   vxzApi = createVxzApi({
     projectRoot: vxzRuntimeRoot,
     cacheRoot: path.join(app.getPath("cache"), "vxz"),
@@ -172,7 +148,7 @@ async function startAppServer() {
       return;
     }
     if (url.pathname.startsWith("/api/remote/")) {
-      handleRemoteRequest(request, response, url);
+      remoteApi.handle(request, response, url);
       return;
     }
     if (url.pathname === "/api/native-file") {
@@ -188,7 +164,8 @@ async function startAppServer() {
   if (!address || typeof address !== "object") {
     throw new Error("Could not start internal app server.");
   }
-  return `http://${HOST}:${address.port}/`;
+  appServerUrl = `http://${HOST}:${address.port}/`;
+  return appServerUrl;
 }
 
 function createWindow(url) {
@@ -250,7 +227,7 @@ function createWindow(url) {
 
 function queueOpenFileArguments(commandLine, workingDirectory) {
   for (const argument of commandLine) {
-    if (typeof argument !== "string" || ![".npy", ".vxz"].includes(path.extname(argument).toLowerCase())) {
+    if (![".npy", ".vxz"].includes(path.extname(argument).toLowerCase())) {
       continue;
     }
     queueOpenFilePath(path.isAbsolute(argument) ? argument : path.resolve(workingDirectory, argument));
@@ -259,31 +236,34 @@ function queueOpenFileArguments(commandLine, workingDirectory) {
 
 function queueOpenFilePath(filePath) {
   const extension = path.extname(filePath).toLowerCase();
+  const resolvedPath = path.resolve(filePath);
   if (extension === ".vxz") {
-    queueVxzPath(filePath);
+    pendingVxzPaths.push(resolvedPath);
+    if (app.isReady()) {
+      flushPendingVxzPaths();
+    }
   } else if (extension === ".npy") {
-    queueFieldPath(filePath);
+    pendingFieldPaths.push(resolvedPath);
+    if (app.isReady()) {
+      void flushPendingFieldPaths();
+    }
   }
 }
 
-function queueVxzPath(filePath) {
-  if (path.extname(filePath).toLowerCase() !== ".vxz") {
+function focusViewerWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) {
     return;
   }
-  pendingVxzPaths.push(path.resolve(filePath));
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.show();
-    mainWindow.focus();
+  if (mainWindow.isMinimized()) {
+    mainWindow.restore();
   }
-  if (app.isReady()) {
-    void flushPendingVxzPaths();
-  }
+  mainWindow.show();
+  mainWindow.focus();
 }
 
-async function flushPendingVxzPaths() {
+function flushPendingVxzPaths() {
   if (
     !rendererReadyForFiles
-    || !appServerUrl
     || !mainWindow
     || mainWindow.isDestroyed()
   ) {
@@ -301,25 +281,10 @@ async function flushPendingVxzPaths() {
   }
 }
 
-function queueFieldPath(filePath) {
-  if (path.extname(filePath).toLowerCase() !== ".npy") {
-    return;
-  }
-  pendingFieldPaths.push(path.resolve(filePath));
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.show();
-    mainWindow.focus();
-  }
-  if (app.isReady()) {
-    void flushPendingFieldPaths();
-  }
-}
-
 async function flushPendingFieldPaths() {
   if (
     flushingFieldPaths
     || !rendererReadyForFiles
-    || !appServerUrl
     || !mainWindow
     || mainWindow.isDestroyed()
   ) {
@@ -365,7 +330,6 @@ async function createFieldOpenRequest(primaryPath) {
   }
 
   const directoryPath = path.dirname(resolvedPrimaryPath);
-  const directoryName = path.basename(directoryPath) || "opened-field";
   const inputFiles = [{ filePath: resolvedPrimaryPath, stat: primaryStat }];
   for (const manifestName of FIELD_MANIFEST_NAMES) {
     const manifestPath = path.join(directoryPath, manifestName);
@@ -381,7 +345,6 @@ async function createFieldOpenRequest(primaryPath) {
     }
   }
 
-  const requestId = crypto.randomUUID();
   const fileRequestIds = [];
   const files = inputFiles.map(({ filePath, stat }) => {
     const fileRequestId = crypto.randomUUID();
@@ -390,10 +353,10 @@ async function createFieldOpenRequest(primaryPath) {
     return {
       requestId: fileRequestId,
       name: path.basename(filePath),
-      webkitRelativePath: `${directoryName}/${path.basename(filePath)}`,
       size: stat.size,
     };
   });
+  const requestId = crypto.randomUUID();
   pendingFieldRequests.set(requestId, {
     primaryPath: resolvedPrimaryPath,
     fileRequestIds,
@@ -551,8 +514,11 @@ function findRuntimeAppIcon() {
 }
 
 function setRuntimeAppIcon() {
+  if (process.platform !== "darwin" || !app.dock) {
+    return;
+  }
   const icon = loadRuntimeAppIcon();
-  if (icon && process.platform === "darwin" && app.dock) {
+  if (icon) {
     app.dock.setIcon(icon);
   }
 }
@@ -578,6 +544,7 @@ function handleNativeFile(request, response, url) {
     sendText(response, 404, "This file-open request has expired");
     return;
   }
+  nativeFileRequests.delete(requestId);
 
   void fs.promises.stat(source.filePath)
     .then((stat) => {
@@ -651,170 +618,6 @@ function handleStaticFile(request, response, url, distDir, indexPath) {
   });
 }
 
-function handleRemoteRequest(request, response, url) {
-  response.setHeader("Access-Control-Allow-Origin", "*");
-  response.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
-  response.setHeader("Access-Control-Allow-Headers", "Content-Type");
-
-  if (request.method === "OPTIONS") {
-    response.writeHead(204);
-    response.end();
-    return;
-  }
-
-  if (request.method !== "GET") {
-    sendText(response, 405, "Only GET is supported");
-    return;
-  }
-
-  const host = url.searchParams.get("host") ?? "";
-  if (!isAllowedRemoteHost(host)) {
-    sendText(response, 400, "Unsupported remote host. Use an SSH alias such as hl_gpu_2.");
-    return;
-  }
-
-  if (url.pathname === "/api/remote/home") {
-    void sshJson(host, HOME_SCRIPT)
-      .then((payload) => sendJson(response, 200, { host, home: payload.home }))
-      .catch((error) => sendText(response, 502, errorMessage(error)));
-    return;
-  }
-
-  if (url.pathname === "/api/remote/list") {
-    const remotePath = url.searchParams.get("path") ?? "";
-    if (!remotePath) {
-      sendText(response, 400, "Missing remote path");
-      return;
-    }
-
-    void sshJson(host, LIST_SCRIPT, [remotePath])
-      .then((payload) => sendJson(response, 200, { host, ...payload }))
-      .catch((error) => sendText(response, 502, errorMessage(error)));
-    return;
-  }
-
-  if (url.pathname === "/api/remote/file") {
-    const remotePath = url.searchParams.get("path") ?? "";
-    handleRemoteFile(request, response, host, remotePath);
-    return;
-  }
-
-  sendText(response, 404, "Not found");
-}
-
-function isAllowedRemoteHost(host) {
-  return remoteHostPolicy.isAllowed(host);
-}
-
-function handleRemoteFile(request, response, host, remotePath) {
-  if (!remotePath) {
-    sendText(response, 400, "Missing remote path");
-    return;
-  }
-
-  const child = spawn(SSH_BIN, [
-    "-o",
-    "BatchMode=yes",
-    "-o",
-    "ConnectTimeout=8",
-    host,
-    remoteCommand(FILE_SCRIPT, [remotePath]),
-  ], { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
-  let stderr = "";
-  let started = false;
-
-  child.stdout.on("data", (chunk) => {
-    if (!started) {
-      started = true;
-      response.writeHead(200, {
-        "Content-Type": "application/octet-stream",
-      });
-    }
-    response.write(chunk);
-  });
-
-  child.stderr.on("data", (chunk) => {
-    stderr += chunk.toString();
-  });
-
-  child.on("error", (error) => {
-    if (!started) {
-      sendText(response, 502, errorMessage(error));
-    } else {
-      response.destroy(error);
-    }
-  });
-
-  child.on("close", (code) => {
-    if (started) {
-      response.end();
-      return;
-    }
-
-    if (code === 0) {
-      response.writeHead(200, { "Content-Type": "application/octet-stream" });
-      response.end();
-    } else {
-      sendText(response, 502, stderr.trim() || `ssh exited with code ${code}`);
-    }
-  });
-
-  request.on("close", () => child.kill("SIGTERM"));
-}
-
-function sshJson(host, script, args = []) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(SSH_BIN, [
-      "-o",
-      "BatchMode=yes",
-      "-o",
-      "ConnectTimeout=8",
-      host,
-      remoteCommand(script, args),
-    ], { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
-
-    let stdout = "";
-    let stderr = "";
-
-    child.stdout.on("data", (chunk) => {
-      stdout += chunk.toString();
-      if (stdout.length > 10_000_000) {
-        child.kill("SIGTERM");
-        reject(new Error("remote response is too large"));
-      }
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
-    });
-    child.on("error", reject);
-    child.on("close", (code) => {
-      if (code !== 0) {
-        reject(new Error(stderr.trim() || `ssh exited with code ${code}`));
-        return;
-      }
-
-      try {
-        resolve(JSON.parse(stdout));
-      } catch (error) {
-        reject(new Error(`could not parse remote JSON: ${errorMessage(error)}`));
-      }
-    });
-  });
-}
-
-function remoteCommand(script, args) {
-  return [
-    "python3",
-    "-c",
-    shellQuote(script),
-    ...args.map((arg) => shellQuote(arg)),
-  ].join(" ");
-}
-
-function shellQuote(value) {
-  return `'${String(value).replaceAll("'", "'\"'\"'")}'`;
-}
-
 function listen(server, port) {
   return new Promise((resolve, reject) => {
     server.once("error", reject);
@@ -844,11 +647,6 @@ function contentType(filePath) {
   return "application/octet-stream";
 }
 
-function sendJson(response, status, payload) {
-  response.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
-  response.end(JSON.stringify(payload));
-}
-
 function sendText(response, status, text) {
   response.writeHead(status, { "Content-Type": "text/plain; charset=utf-8" });
   response.end(text);
@@ -872,49 +670,3 @@ async function showStartupError(error) {
     detail: message,
   });
 }
-
-const LIST_SCRIPT = `
-import json
-import os
-import sys
-
-path = os.path.abspath(os.path.expanduser(sys.argv[1]))
-entries = []
-
-with os.scandir(path) as handle:
-    for entry in handle:
-        try:
-            is_dir = entry.is_dir(follow_symlinks=True)
-            stat = entry.stat(follow_symlinks=True)
-        except OSError:
-            continue
-        entries.append({
-            "name": entry.name,
-            "path": os.path.join(path, entry.name),
-            "type": "directory" if is_dir else "file",
-            "size": None if is_dir else stat.st_size,
-            "mtimeMs": int(stat.st_mtime * 1000),
-        })
-
-entries.sort(key=lambda item: (item["type"] != "directory", item["name"].lower()))
-print(json.dumps({
-    "path": path,
-    "parent": os.path.dirname(path) if os.path.dirname(path) != path else path,
-    "entries": entries,
-}))
-`;
-
-const HOME_SCRIPT = `
-import json
-import os
-
-print(json.dumps({"home": os.path.expanduser("~")}))
-`;
-
-const FILE_SCRIPT = `
-import shutil
-import sys
-
-with open(sys.argv[1], "rb") as handle:
-    shutil.copyfileobj(handle, sys.stdout.buffer)
-`;

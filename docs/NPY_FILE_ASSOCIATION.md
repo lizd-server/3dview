@@ -79,7 +79,7 @@ arrays in the directory are not loaded automatically; use **Open field** or
 Without metadata, the viewer infers a suggested semantic from the dtype and uses
 index coordinates. You can change categorical/continuous semantics, axis order,
 point/cell association, and coordinates in the field controls. See the
-[generic NumPy field reference](../README.md#generic-npy-fields-phase-1) for the
+[expected NumPy input reference](../README.md#expected-npy-input) for the
 complete metadata format.
 
 ## Input requirements

@@ -32,7 +32,6 @@ export type PipelineCategoryKey =
   | "surfaceBoundaryOutside";
 
 export interface PipelineCategoryDefinition {
-  key: PipelineCategoryKey;
   label: string;
   color: string;
 }
@@ -49,41 +48,23 @@ export interface PipelineFieldPreset {
 
 export type PipelineGroupRole = "label" | "components" | "cases" | "insideFiltered" | "surfaceBoundary";
 
-export const PIPELINE_CATEGORY_ORDER: readonly PipelineCategoryKey[] = [
-  "unknown",
-  "outside",
-  "inside",
-  "band",
-  "surface",
-  "components",
-  "insideOnly",
-  "outsideOnly",
-  "bothSides",
-  "isolated",
-  "linfCase",
-  "surfaceBoundaryInside",
-  "surfaceBoundaryOutside",
-];
-
 export const PIPELINE_CATEGORIES: Record<PipelineCategoryKey, PipelineCategoryDefinition> = {
-  unknown: { key: "unknown", label: "Unknown / background", color: "#1f2933" },
-  outside: { key: "outside", label: "Outside", color: "#2563eb" },
-  inside: { key: "inside", label: "Inside", color: "#dc2626" },
-  surface: { key: "surface", label: "Surface barrier", color: "#000000" },
-  band: { key: "band", label: "Unresolved band", color: "#facc15" },
-  components: { key: "components", label: "CCL components", color: "#74b9ff" },
-  insideOnly: { key: "insideOnly", label: "Inside-only case", color: "#22c55e" },
-  outsideOnly: { key: "outsideOnly", label: "Outside-only case", color: "#a855f7" },
-  bothSides: { key: "bothSides", label: "Both-sides case", color: "#f97316" },
-  isolated: { key: "isolated", label: "Isolated case", color: "#06b6d4" },
-  linfCase: { key: "linfCase", label: "L-infinity distance case", color: "#64748b" },
+  unknown: { label: "Unknown / background", color: "#1f2933" },
+  outside: { label: "Outside", color: "#2563eb" },
+  inside: { label: "Inside", color: "#dc2626" },
+  surface: { label: "Surface barrier", color: "#000000" },
+  band: { label: "Unresolved band", color: "#facc15" },
+  components: { label: "CCL components", color: "#74b9ff" },
+  insideOnly: { label: "Inside-only case", color: "#22c55e" },
+  outsideOnly: { label: "Outside-only case", color: "#a855f7" },
+  bothSides: { label: "Both-sides case", color: "#f97316" },
+  isolated: { label: "Isolated case", color: "#06b6d4" },
+  linfCase: { label: "L-infinity distance case", color: "#64748b" },
   surfaceBoundaryInside: {
-    key: "surfaceBoundaryInside",
     label: "Surface boundary inside",
     color: "#39ff14",
   },
   surfaceBoundaryOutside: {
-    key: "surfaceBoundaryOutside",
     label: "Surface boundary outside",
     color: "#ff00ff",
   },
@@ -243,10 +224,6 @@ export function inferPipelinePreset(name: string): PipelineFieldPreset | null {
   return null;
 }
 
-export function pipelineFileOrder(name: string): number | null {
-  return inferPipelinePreset(name)?.order ?? null;
-}
-
 /** Legacy colors apply only while the resolved field keeps the preset semantics. */
 export function applicablePipelineVisualization(
   name: string,
@@ -378,7 +355,7 @@ function integralPipelineValue(value: FieldValue): FieldValue | null {
   if (typeof value === "bigint") {
     return value;
   }
-  return Number.isFinite(value) ? Math.trunc(value) : null;
+  return Number.isSafeInteger(value) ? value : null;
 }
 
 function greaterThan(value: FieldValue, threshold: number): boolean {

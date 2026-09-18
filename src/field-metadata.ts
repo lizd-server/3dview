@@ -234,7 +234,6 @@ export function resolveFieldDefinition(
       : normalizeExactKeyForDtype(merged.sparseDefault, array.dtype),
     valueDescription: merged.valueDescription,
     stylePreset: merged.stylePreset,
-    presetId: options.preset?.id,
   };
 }
 

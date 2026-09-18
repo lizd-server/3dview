@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  IDENTITY_INDEX_TO_WORLD,
   type DenseField,
   type NpyNumericArray,
   type ResolvedFieldDefinition,
@@ -53,26 +52,28 @@ test("reads an exact point and all three canonical slices from a C-order XYZ fie
   ]);
 });
 
-test("uses sourceAxisOrder and Fortran strides while keeping provider coordinates XYZ", async () => {
-  const provider = new InMemoryFieldProvider(createNumberField(true, ["z", "y", "x"]));
-
-  assert.equal((await provider.readPoint([1, 2, 3])).value, 123);
-  assert.deepEqual(
-    Array.from((await provider.readSlice({ axis: "x", index: 1 })).values),
-    [
-      100, 101, 102, 103,
-      110, 111, 112, 113,
-      120, 121, 122, 123,
-    ],
-  );
-  assert.deepEqual(
-    Array.from((await provider.readSlice({ axis: "y", index: 1 })).values),
-    [10, 110, 11, 111, 12, 112, 13, 113],
-  );
-  assert.deepEqual(
-    Array.from((await provider.readSlice({ axis: "z", index: 2 })).values),
-    [2, 102, 12, 112, 22, 122],
-  );
+test("keeps logical XYZ coordinates across source order and storage layout", async () => {
+  const cases: Array<[boolean, SourceAxisOrder]> = [
+    [false, ["z", "y", "x"]],
+    [true, ["x", "y", "z"]],
+    [true, ["z", "y", "x"]],
+  ];
+  for (const [fortranOrder, sourceAxisOrder] of cases) {
+    const provider = new InMemoryFieldProvider(createNumberField(fortranOrder, sourceAxisOrder));
+    assert.equal((await provider.readPoint([1, 2, 3])).value, 123);
+    assert.deepEqual(
+      Array.from((await provider.readSlice({ axis: "x", index: 1 })).values),
+      [100, 101, 102, 103, 110, 111, 112, 113, 120, 121, 122, 123],
+    );
+    assert.deepEqual(
+      Array.from((await provider.readSlice({ axis: "y", index: 1 })).values),
+      [10, 110, 11, 111, 12, 112, 13, 113],
+    );
+    assert.deepEqual(
+      Array.from((await provider.readSlice({ axis: "z", index: 2 })).values),
+      [2, 102, 12, 112, 22, 122],
+    );
+  }
 });
 
 test("preserves uint64 labels beyond JavaScript's safe integer range", async () => {
@@ -176,7 +177,12 @@ function createDefinition(
     association: "point",
     sourceAxisOrder,
     logicalShape,
-    indexToWorld: IDENTITY_INDEX_TO_WORLD,
+    indexToWorld: [
+      1, 0, 0, 0,
+      0, 1, 0, 0,
+      0, 0, 1, 0,
+      0, 0, 0, 1,
+    ],
     coordinateSource: "index",
     coordinatePreset: "index",
     labels: {},

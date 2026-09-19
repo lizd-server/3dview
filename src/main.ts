@@ -637,7 +637,11 @@ class MeshSliceViewer {
     }
   }
 
-  private async loadPipelineFolder(files: SourceFile[], folderLabel?: string): Promise<void> {
+  private async loadPipelineFolder(
+    files: SourceFile[],
+    folderLabel?: string,
+    options: { loadMeshes?: boolean } = {},
+  ): Promise<void> {
     this.clearVxzSource();
     this.clearServerVolumeSlice();
     const selection = findPipelineFolderSelection(files);
@@ -657,16 +661,19 @@ class MeshSliceViewer {
 
     const caseIndex = this.volumeSlots.findIndex((slot) => slot.name.toLowerCase().includes("cases"));
     this.arraySelect.value = String(caseIndex >= 0 ? caseIndex : 0);
-    if (selection.meshes.length > 0) {
+    const loadMeshes = options.loadMeshes ?? true;
+    if (loadMeshes && selection.meshes.length > 0) {
       await this.loadMeshFiles(selection.meshes, { replace: true });
-    } else {
+    } else if (loadMeshes) {
       this.clearGroup(this.meshRoot);
       this.currentMeshFiles = [];
       this.meshItems = [];
       this.renderMeshList();
     }
     await this.selectVolume(caseIndex >= 0 ? caseIndex : 0, true);
-    const meshText = selection.meshes.length > 0
+    const meshText = !loadMeshes && selection.meshes.length > 0
+      ? " and meshes available on demand"
+      : selection.meshes.length > 0
       ? ` and ${selection.meshes.length} mesh${selection.meshes.length === 1 ? "" : "es"}`
       : " and no mesh";
     this.setStatus(
@@ -760,7 +767,9 @@ class MeshSliceViewer {
 
       const files = this.remoteSourceFiles(response.entries, response.path, response.host);
 
-      await this.loadPipelineFolder(files, `${response.host}:${response.path}`);
+      await this.loadPipelineFolder(files, `${response.host}:${response.path}`, {
+        loadMeshes: response.host !== "local",
+      });
       this.setRemoteStatus(`Loaded ${response.host}:${response.path}`);
     } catch (error) {
       if (!isAbortError(error)) {
@@ -1849,7 +1858,7 @@ class MeshSliceViewer {
       try {
         object = await this.parseMesh(file, (progress) => {
           if (loadTaskId !== null) {
-            this.setLoadProgress(loadTaskId, `Downloading mesh ${file.name}`, progress);
+            this.setLoadProgress(loadTaskId, `Transferring mesh ${file.name} to WebGL`, progress);
           }
         });
         if (loadTaskId !== null) {

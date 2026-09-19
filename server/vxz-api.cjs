@@ -474,14 +474,10 @@ function isAllowedOrigin(origin, host, allowedOrigins) {
   }
   try {
     const parsed = new URL(origin);
-    return parsed.protocol === "http:" && parsed.host === host && isLoopbackHost(parsed.hostname);
+    return (parsed.protocol === "http:" || parsed.protocol === "https:") && parsed.host === host;
   } catch {
     return false;
   }
-}
-
-function isLoopbackHost(hostname) {
-  return hostname === "127.0.0.1" || hostname === "localhost" || hostname === "[::1]";
 }
 
 async function readCompleteCache(jobDir) {

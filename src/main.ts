@@ -19,7 +19,7 @@ import {
   type VxzMetadata,
 } from "./types";
 import { normalizeObjectToPreferredBounds } from "./mesh-normalization";
-import { parseNpy } from "./volumeLoader";
+import { parseNpy, visualizationForNpyName } from "./volumeLoader";
 import {
   projectVxzDualVertexToSlice,
   vxzDualOverlayScale,
@@ -59,7 +59,7 @@ const DOT_BACKGROUND: [number, number, number] = [238, 242, 247];
 const SCALAR_DISTANCE_BLACK_THRESHOLD = 0.1;
 const URL_PARAMS = new URLSearchParams(window.location.search);
 const IS_ELECTRON_APP = URL_PARAMS.has("electron");
-const REMOTE_API_BASE = URL_PARAMS.get("apiBase") ?? "http://127.0.0.1:5175/api/remote";
+const REMOTE_API_BASE = URL_PARAMS.get("apiBase") ?? new URL("/api/remote", window.location.href).toString();
 const VXZ_API_BASE = (() => {
   const value = new URL(REMOTE_API_BASE, window.location.href);
   value.pathname = value.pathname.replace(/\/api\/remote\/?$/, "/api/vxz");
@@ -67,8 +67,8 @@ const VXZ_API_BASE = (() => {
   value.hash = "";
   return value.toString().replace(/\/$/, "");
 })();
-const DEFAULT_REMOTE_HOST = "hl_gpu_2";
-const REMOTE_DEFAULT_PATH = "/mnt/bn/vai3d-hl-1/Users/lizd/work/floodfill/output";
+const DEFAULT_REMOTE_HOST = "local";
+const REMOTE_DEFAULT_PATH = "";
 const REMOTE_LAST_HOST_STORAGE_KEY = "voxel-mesh-viewer:last-remote-host";
 const REMOTE_LAST_PATH_STORAGE_KEY = "voxel-mesh-viewer:last-remote-path";
 const REMOTE_CACHE_DB_NAME = "voxel-mesh-viewer-cache";
@@ -142,6 +142,23 @@ interface VolumeSlot {
   name: string;
   volume?: VolumeData;
   file?: SourceFile;
+  serverSource?: RemoteFileHandle;
+}
+
+interface ServerVolumeMetadata {
+  name: string;
+  shape: [number, number, number];
+  dtype: string;
+  fortranOrder: boolean;
+}
+
+interface ServerVolumeSlice {
+  source: RemoteFileHandle;
+  axis: SliceAxis;
+  index: number;
+  width: number;
+  height: number;
+  data: Float32Array;
 }
 
 interface MeshItem {
@@ -223,6 +240,11 @@ interface RemoteListResponse {
   entries: RemoteEntry[];
 }
 
+interface RemoteHomeResponse {
+  host: string;
+  home: string;
+}
+
 class MeshSliceViewer {
   private readonly canvas = getElement<HTMLCanvasElement>("viewerCanvas");
   private readonly sliceCanvas = getElement<HTMLCanvasElement>("sliceCanvas");
@@ -248,8 +270,10 @@ class MeshSliceViewer {
   private readonly remotePathInput = getElement<HTMLInputElement>("remotePathInput");
   private readonly remoteStatus = getElement<HTMLElement>("remoteStatus");
   private readonly remoteList = getElement<HTMLElement>("remoteList");
+  private readonly remoteCachePanel = document.querySelector<HTMLElement>(".remote-cache");
   private readonly remoteCacheUsage = getElement<HTMLElement>("remoteCacheUsage");
   private readonly remoteCacheDetails = getElement<HTMLElement>("remoteCacheDetails");
+  private readonly remoteDownloadButton = getElement<HTMLButtonElement>("remoteDownloadButton");
   private readonly loadProgress = getElement<HTMLElement>("loadProgress");
   private readonly arraySelect = getElement<HTMLSelectElement>("arraySelect");
   private readonly arraySelectRow = getElement<HTMLElement>("arraySelectRow");
@@ -304,6 +328,9 @@ class MeshSliceViewer {
   private activeVolume: VolumeData | null = null;
   private labelMetadataByFileName = new Map<string, VolumeLabelMetadata>();
   private volumeLoadToken = 0;
+  private serverVolumeSlice: ServerVolumeSlice | null = null;
+  private serverVolumeSliceAbort: AbortController | null = null;
+  private serverVolumeSliceToken = 0;
   private nextLoadTaskId = 1;
   private readonly loadTasks = new Map<number, LoadTask>();
   private currentMeshFiles: SourceFile[] = [];
@@ -473,7 +500,7 @@ class MeshSliceViewer {
     getElement<HTMLButtonElement>("remoteLoadButton").addEventListener("click", () => {
       void this.loadCurrentRemoteFolder();
     });
-    getElement<HTMLButtonElement>("remoteDownloadButton").addEventListener("click", () => {
+    this.remoteDownloadButton.addEventListener("click", () => {
       void this.downloadCurrentRemoteFolder();
     });
     getElement<HTMLButtonElement>("remoteCacheRefreshButton").addEventListener("click", () => {
@@ -612,6 +639,7 @@ class MeshSliceViewer {
 
   private async loadPipelineFolder(files: SourceFile[], folderLabel?: string): Promise<void> {
     this.clearVxzSource();
+    this.clearServerVolumeSlice();
     const selection = findPipelineFolderSelection(files);
     const displayFolder = folderLabel || selection.directory || "(selected folder)";
     const statusFolder = compactFolderLabel(displayFolder);
@@ -623,6 +651,7 @@ class MeshSliceViewer {
     this.volumeSlots = selection.volumes.map((file) => ({
       name: file.name,
       file,
+      serverSource: file instanceof RemoteFileHandle && file.supportsServerSlices() ? file : undefined,
     }));
     this.populateArraySelect();
 
@@ -661,17 +690,18 @@ class MeshSliceViewer {
   }
 
   private async loadRemotePath(path: string): Promise<void> {
-    if (!path) {
-      this.setRemoteStatus("Enter a remote path");
-      return;
-    }
-
     const host = this.currentRemoteHost();
     const token = ++this.remoteListToken;
-    this.setRemoteStatus(`Listing ${host}:${path}`);
+    let requestedPath = path;
 
     try {
-      const response = await fetchRemoteJson<RemoteListResponse>("list", host, { path });
+      if (!requestedPath) {
+        this.setRemoteStatus(`Resolving ${host} home`);
+        const home = await fetchRemoteJson<RemoteHomeResponse>("home", host);
+        requestedPath = home.home;
+      }
+      this.setRemoteStatus(`Listing ${host}:${requestedPath}`);
+      const response = await fetchRemoteJson<RemoteListResponse>("list", host, { path: requestedPath });
       if (token !== this.remoteListToken) {
         return;
       }
@@ -685,6 +715,7 @@ class MeshSliceViewer {
       this.rememberRemoteHost(response.host);
       this.rememberRemotePath(response.path);
       this.renderRemoteList(response.entries);
+      this.updateRemoteDownloadButton(response.host);
       this.setRemoteStatus(`${response.entries.length} item${response.entries.length === 1 ? "" : "s"}`);
     } catch (error) {
       if (token === this.remoteListToken) {
@@ -758,6 +789,12 @@ class MeshSliceViewer {
 
     try {
       const host = this.currentRemoteHost();
+      if (host === "local") {
+        const message = "Local server files are read on demand and are not copied into browser storage";
+        this.setStatus(message);
+        this.setRemoteStatus(message);
+        return;
+      }
       const response =
         path === this.remotePath && host === this.remoteHost
           ? { host: this.remoteHost, path: this.remotePath, parent: this.remoteParent, entries: this.remoteEntries }
@@ -907,6 +944,16 @@ class MeshSliceViewer {
   private setRemoteStatus(message: string): void {
     this.remoteStatus.textContent = message;
     this.remoteStatus.title = message;
+  }
+
+  private updateRemoteDownloadButton(host: string): void {
+    const onDemand = host === "local";
+    this.remoteCachePanel?.classList.toggle("hidden", onDemand);
+    this.remoteDownloadButton.disabled = onDemand;
+    this.remoteDownloadButton.textContent = onDemand ? "On-demand" : "Cache Folder";
+    this.remoteDownloadButton.title = onDemand
+      ? "Local server files are read on demand and are not stored in the browser cache"
+      : "Cache recognized files in browser storage";
   }
 
   private currentRemoteHost(): string {
@@ -1076,7 +1123,9 @@ class MeshSliceViewer {
       option.value = String(index);
       option.textContent = slot.volume
         ? `${slot.name} (${slot.volume.shape.join(" x ")})`
-        : `${slot.name} (load/cache on select)`;
+        : slot.serverSource
+          ? `${slot.name} (server slices)`
+          : `${slot.name} (load/cache on select)`;
       this.arraySelect.append(option);
     });
 
@@ -1101,6 +1150,7 @@ class MeshSliceViewer {
 
     try {
       this.releaseDeferredVolumesExcept(index);
+      this.clearServerVolumeSlice();
 
       if (!slot.volume) {
         if (!slot.file) {
@@ -1108,25 +1158,44 @@ class MeshSliceViewer {
         }
 
         this.activeVolume = null;
-        loadTaskId = this.beginFileLoad(`Loading ${slot.file.name}`);
-        this.setStatus(`Loading ${slot.file.name}`);
-        await yieldToBrowser();
-        const buffer = await slot.file.arrayBuffer((progress) => {
-          if (loadTaskId !== null) {
-            this.setLoadProgress(loadTaskId, `Downloading ${slot.file?.name ?? slot.name}`, progress);
-          }
-        });
-        this.setLoadProgress(loadTaskId, `Parsing ${slot.file.name}`, {
-          loaded: buffer.byteLength,
-          total: buffer.byteLength,
-        });
-        await yieldToBrowser();
-        const volume = parseNpy(buffer, slot.file.name);
+        let volume: VolumeData;
+        if (slot.serverSource) {
+          loadTaskId = this.beginFileLoad(`Reading metadata for ${slot.file.name}`);
+          this.setStatus(`Reading server metadata for ${slot.file.name}`);
+          const metadata = await slot.serverSource.volumeMetadata();
+          volume = {
+            name: slot.file.name,
+            shape: metadata.shape,
+            sourceShape: metadata.shape,
+            data: new Float32Array(0),
+            dtype: metadata.dtype,
+            fortranOrder: metadata.fortranOrder,
+            warnings: [],
+            visualization: visualizationForNpyName(slot.file.name),
+          };
+        } else {
+          loadTaskId = this.beginFileLoad(`Loading ${slot.file.name}`);
+          this.setStatus(`Loading ${slot.file.name}`);
+          await yieldToBrowser();
+          const buffer = await slot.file.arrayBuffer((progress) => {
+            if (loadTaskId !== null) {
+              this.setLoadProgress(loadTaskId, `Downloading ${slot.file?.name ?? slot.name}`, progress);
+            }
+          });
+          this.setLoadProgress(loadTaskId, `Parsing ${slot.file.name}`, {
+            loaded: buffer.byteLength,
+            total: buffer.byteLength,
+          });
+          await yieldToBrowser();
+          volume = parseNpy(buffer, slot.file.name);
+        }
         volume.labelMetadata = this.labelMetadataByFileName.get(baseFileName(slot.file.name));
         slot.volume = volume;
         slot.name = volume.name;
         this.populateArraySelect();
-        this.finishLoadProgress(loadTaskId, `Loaded ${volume.name}`);
+        this.finishLoadProgress(loadTaskId, slot.serverSource
+          ? `Ready for server slices: ${volume.name}`
+          : `Loaded ${volume.name}`);
         loadTaskId = null;
         await yieldToBrowser();
       }
@@ -1166,10 +1235,17 @@ class MeshSliceViewer {
 
   private releaseDeferredVolumesExcept(index: number): void {
     for (let slotIndex = 0; slotIndex < this.volumeSlots.length; slotIndex += 1) {
-      if (slotIndex !== index && this.volumeSlots[slotIndex].file) {
+      if (slotIndex !== index && this.volumeSlots[slotIndex].file && !this.volumeSlots[slotIndex].serverSource) {
         this.volumeSlots[slotIndex].volume = undefined;
       }
     }
+  }
+
+  private clearServerVolumeSlice(): void {
+    this.serverVolumeSliceToken += 1;
+    this.serverVolumeSliceAbort?.abort();
+    this.serverVolumeSliceAbort = null;
+    this.serverVolumeSlice = null;
   }
 
   private async loadSelectedVxz(): Promise<void> {
@@ -1256,6 +1332,7 @@ class MeshSliceViewer {
     openJob: (signal: AbortSignal) => Promise<VxzJobResponse>,
   ): Promise<void> {
     this.clearVxzSource();
+    this.clearServerVolumeSlice();
     this.activeVolume = null;
     this.volumeLoadToken += 1;
     this.volumeSlots = [];
@@ -2127,6 +2204,63 @@ class MeshSliceViewer {
     }
   }
 
+  private activeServerVolumeSource(): RemoteFileHandle | null {
+    const selected = Number(this.arraySelect.value);
+    return this.volumeSlots[selected]?.serverSource ?? null;
+  }
+
+  private serverSliceMatches(source: RemoteFileHandle): boolean {
+    return this.serverVolumeSlice?.source === source
+      && this.serverVolumeSlice.axis === this.sliceAxis
+      && this.serverVolumeSlice.index === this.sliceIndex;
+  }
+
+  private async loadServerVolumeSlice(source: RemoteFileHandle): Promise<void> {
+    const volume = this.activeVolume;
+    if (!volume || this.serverSliceMatches(source)) {
+      return;
+    }
+
+    const token = ++this.serverVolumeSliceToken;
+    this.serverVolumeSliceAbort?.abort();
+    const controller = new AbortController();
+    this.serverVolumeSliceAbort = controller;
+    const axis = this.sliceAxis;
+    const index = this.sliceIndex;
+    const [width, height] = axis === "x"
+      ? [volume.shape[2], volume.shape[1]]
+      : axis === "y"
+        ? [volume.shape[0], volume.shape[2]]
+        : [volume.shape[0], volume.shape[1]];
+    this.setStatus(`Reading ${axis.toUpperCase()}=${index} from ${volume.name}`);
+
+    try {
+      const buffer = await source.volumeSlice(axis, index, controller.signal);
+      if (token !== this.serverVolumeSliceToken) {
+        return;
+      }
+      const expectedBytes = width * height * Float32Array.BYTES_PER_ELEMENT;
+      if (buffer.byteLength !== expectedBytes) {
+        throw new Error(`Server slice returned ${buffer.byteLength} bytes; expected ${expectedBytes}`);
+      }
+      this.serverVolumeSlice = {
+        source,
+        axis,
+        index,
+        width,
+        height,
+        data: new Float32Array(buffer),
+      };
+      this.setStatus(`Volume ${volume.name}: ${volume.shape.join(" x ")} ${volume.dtype}; server slice ${axis.toUpperCase()}=${index}`);
+      this.renderSlice();
+    } catch (error) {
+      if (!isAbortError(error) && token === this.serverVolumeSliceToken) {
+        this.setStatus(errorMessage(error));
+        this.clearSliceCanvas(errorMessage(error));
+      }
+    }
+  }
+
   private renderSlice(): void {
     if (this.vxzMetadata && this.vxzJobId) {
       void this.renderVxzSlice();
@@ -2141,6 +2275,13 @@ class MeshSliceViewer {
       this.renderLegend(new Map());
       this.setSlicePlaneTextureEnabled(false);
       this.setInspector();
+      return;
+    }
+
+    const serverSource = this.activeServerVolumeSource();
+    if (serverSource && !this.serverSliceMatches(serverSource)) {
+      void this.loadServerVolumeSlice(serverSource);
+      this.clearSliceCanvas(`Reading ${this.sliceAxis.toUpperCase()}=${this.sliceIndex} from server`);
       return;
     }
 
@@ -2667,7 +2808,10 @@ class MeshSliceViewer {
     const offset = volume.fortranOrder
       ? grid[0] + nx * (grid[1] + ny * grid[2])
       : grid[2] + nz * (grid[1] + ny * grid[0]);
-    const label = Number(volume.data[offset]);
+    const serverSlice = this.serverVolumeSlice;
+    const label = serverSlice && this.serverSliceMatches(serverSlice.source)
+      ? Number(serverSlice.data[py * serverSlice.width + px])
+      : Number(volume.data[offset]);
     const { category } = this.getSampleDisplay({ grid, worldIndex, world: new THREE.Vector3(), label, category: null });
     const world = new THREE.Vector3(
       indexToWorld(worldIndex[0], dims[0]),
@@ -2998,13 +3142,16 @@ class RemoteFileHandle implements SourceFile {
   }
 
   async arrayBuffer(onProgress?: ProgressCallback, signal?: AbortSignal): Promise<ArrayBuffer> {
-    const cached = await readCachedRemoteFile(this.cacheKey, this.size, this.mtimeMs);
-    if (cached) {
-      onProgress?.({
-        loaded: cached.byteLength,
-        total: cached.byteLength,
-      });
-      return cached;
+    const persistInBrowser = this.remoteHost !== "local";
+    if (persistInBrowser) {
+      const cached = await readCachedRemoteFile(this.cacheKey, this.size, this.mtimeMs);
+      if (cached) {
+        onProgress?.({
+          loaded: cached.byteLength,
+          total: cached.byteLength,
+        });
+        return cached;
+      }
     }
 
     let entry = remoteFileDownloads.get(this.cacheKey);
@@ -3039,7 +3186,9 @@ class RemoteFileHandle implements SourceFile {
         entry.loaded = buffer.byteLength;
         entry.total = entry.total ?? buffer.byteLength;
         notifyRemoteFileDownloadProgress(entry);
-        await writeCachedRemoteFile(this.cacheKey, buffer, this.size, this.mtimeMs);
+        if (persistInBrowser) {
+          await writeCachedRemoteFile(this.cacheKey, buffer, this.size, this.mtimeMs);
+        }
         return buffer;
       })
       .finally(() => {
@@ -3103,6 +3252,42 @@ class RemoteFileHandle implements SourceFile {
 
   async text(onProgress?: ProgressCallback, signal?: AbortSignal): Promise<string> {
     return new TextDecoder().decode(await this.arrayBuffer(onProgress, signal));
+  }
+
+  supportsServerSlices(): boolean {
+    return this.remoteHost === "local" && this.name.toLowerCase().endsWith(".npy");
+  }
+
+  async volumeMetadata(signal?: AbortSignal): Promise<ServerVolumeMetadata> {
+    if (!this.supportsServerSlices()) {
+      throw new Error("Server-side slices are only available for local NPY files");
+    }
+    const response = await fetch(remoteUrl("volume-metadata", this.remoteHost, { path: this.remotePath }), {
+      cache: "no-store",
+      signal,
+    });
+    if (!response.ok) {
+      throw new Error(await responseError(response));
+    }
+    return await response.json() as ServerVolumeMetadata;
+  }
+
+  async volumeSlice(axis: SliceAxis, index: number, signal?: AbortSignal): Promise<ArrayBuffer> {
+    if (!this.supportsServerSlices()) {
+      throw new Error("Server-side slices are only available for local NPY files");
+    }
+    const response = await fetch(remoteUrl("volume-slice", this.remoteHost, {
+      path: this.remotePath,
+      axis,
+      index: String(index),
+    }), {
+      cache: "no-store",
+      signal,
+    });
+    if (!response.ok) {
+      throw new Error(await responseError(response));
+    }
+    return await response.arrayBuffer();
   }
 }
 
@@ -3412,7 +3597,7 @@ function findPipelineFolderSelection(files: SourceFile[]): PipelineFolderSelecti
     const directory = parts.join("/");
     const lowerName = name.toLowerCase();
 
-    if (lowerName === "npy_labels.json") {
+    if (lowerName === "npy_labels.json" || lowerName === "fields.json") {
       manifestByDirectory.set(directory, file);
       continue;
     }
@@ -3487,7 +3672,7 @@ function findPipelineFolderSelection(files: SourceFile[]): PipelineFolderSelecti
     const volumeDirectories = Array.from(volumesByDirectory.keys());
     if (volumeDirectories.length === 0) {
       throw new Error(
-        "No supported pipeline .npy files were found. Expected files such as 000_original_boundary.npy, 001_closed_boundary.npy, 002_free_space_labels.npy, 003_pseudo_boundary_components.npy, 004_final_labels.npy, 000_initial_ccl_labels.npy, NNN_final_ccl_labels.npy, NNN_final_ccl_components.npy, NNN_final_ccl_cases.npy, MMM_inside_filtered_labels.npy, SSS_surface_boundary_classification.npy, 999_scalar_field.npy, or 999_linf_distance_cases.npy.",
+        "No supported pipeline .npy files were found. Expected files such as 000_original_boundary.npy, 001_closed_boundary.npy, 002_free_space_labels.npy, 003_pseudo_boundary_components.npy, 004_final_labels.npy, 000_initial_ccl_labels.npy, NNN_final_ccl_labels.npy, NNN_final_ccl_components.npy, NNN_final_ccl_cases.npy, MMM_inside_filtered_labels.npy, SSS_surface_boundary_classification.npy, NNN_labels_before_flood.npy, NNN_labels_after_flood.npy, NNN_signed_distance.npy, 999_scalar_field.npy, or 999_linf_distance_cases.npy.",
       );
     }
     directory = volumeDirectories.sort((a, b) => directoryRank(b, meshesByDirectory, volumesByDirectory) - directoryRank(a, meshesByDirectory, volumesByDirectory) || a.localeCompare(b))[0];
@@ -3524,6 +3709,12 @@ async function loadNpyLabelManifest(file?: SourceFile): Promise<Map<string, Volu
         value_description?: unknown;
         isovalue?: unknown;
       }>;
+      fields?: Record<string, {
+        semantic?: unknown;
+        labels?: unknown;
+        valueDescription?: unknown;
+        continuousStyle?: { isovalue?: unknown };
+      }>;
     };
     const result = new Map<string, VolumeLabelMetadata>();
 
@@ -3536,11 +3727,41 @@ async function loadNpyLabelManifest(file?: SourceFile): Promise<Map<string, Volu
         isovalue: typeof metadata.isovalue === "number" ? metadata.isovalue : undefined,
       });
     }
+    for (const [name, metadata] of Object.entries(manifest.fields ?? {})) {
+      result.set(baseFileName(name), {
+        kind: typeof metadata.semantic === "string" ? metadata.semantic : undefined,
+        labels: fieldLabelRecord(metadata.labels),
+        valueDescription: typeof metadata.valueDescription === "string" ? metadata.valueDescription : undefined,
+        isovalue: typeof metadata.continuousStyle?.isovalue === "number"
+          ? metadata.continuousStyle.isovalue
+          : undefined,
+      });
+    }
 
     return result;
   } catch {
     return new Map();
   }
+}
+
+function fieldLabelRecord(value: unknown): Record<string, string> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+
+  const entries = Object.entries(value).flatMap(([key, definition]) => {
+    if (typeof definition === "string") {
+      return [[key, definition] as [string, string]];
+    }
+    if (definition && typeof definition === "object" && !Array.isArray(definition)) {
+      const name = (definition as { name?: unknown }).name;
+      if (typeof name === "string") {
+        return [[key, name] as [string, string]];
+      }
+    }
+    return [];
+  });
+  return entries.length > 0 ? Object.fromEntries(entries) : undefined;
 }
 
 function stringRecord(value: unknown): Record<string, string> | undefined {
@@ -3640,7 +3861,7 @@ function pipelineVolumeOrder(name: string, role: PipelineVolumeRole): number {
 
 function parseStandalonePipelineNpyFileName(name: string): { order: number } | null {
   const lowerName = name.toLowerCase();
-  const match = /^(\d{3})_(original_boundary|closed_boundary|free_space_labels|pseudo_boundary_components|final_labels)\.npy$/i.exec(lowerName);
+  const match = /^(\d{3})_(original_boundary|closed_boundary|free_space_labels|pseudo_boundary_components|final_labels|labels_before_flood|labels_after_flood|signed_distance)\.npy$/i.exec(lowerName);
   if (!match) {
     return null;
   }

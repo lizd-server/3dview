@@ -11,8 +11,26 @@ npm run dev
 
 The dev command starts:
 
-- frontend: `http://127.0.0.1:5173/`
-- local remote-file backend: `http://127.0.0.1:5175/`
+- frontend: `http://<this-machine-ip>:5173/`
+- local remote-file backend: `http://<this-machine-ip>:5175/` (normally reached through the frontend proxy)
+
+For a production-style single-port LAN deployment:
+
+```bash
+npm run build
+npm start
+```
+
+The viewer is then available at `http://<this-machine-ip>:5175/`. It listens on
+all network interfaces by default. Only expose this port on a trusted network,
+because the viewer can upload large VXZ files and read files through the configured
+SSH aliases. The bind address, port, allowed browser origins, and SSH aliases can
+be overridden with `REMOTE_VIEWER_HOST`, `REMOTE_VIEWER_PORT`,
+`REMOTE_VIEWER_ORIGINS` (comma-separated), and `REMOTE_SSH_HOSTS`
+(comma-separated), respectively. Files on the viewer host are available from the
+Remote panel by selecting the `local` source. By default this source is restricted
+to `temp_output`; use `LOCAL_VIEWER_ROOTS` with colon-separated absolute paths to
+expose additional directories.
 
 For a persistent local service managed by pm2:
 
@@ -20,6 +38,9 @@ For a persistent local service managed by pm2:
 npm run pm2:start
 pm2 save
 ```
+
+The pm2 start command builds the frontend first and serves both the frontend and
+API from port `5175`.
 
 Useful pm2 commands:
 
@@ -167,6 +188,8 @@ The viewer also loads earlier/later-stage and newer debug volumes when they are 
 - `999_scalar_field.npy`
 - `999_linf_distance_cases.npy`, when the upstream run uses the L-infinity distance field
 - `npy_labels.json`, when present, documents the upstream label meanings for the folder
+- `NNN_labels_before_flood.npy`, `NNN_labels_after_flood.npy`, and
+  `NNN_signed_distance.npy`, with their `fields.json` metadata manifest
 
 If `.ply`, `.obj`, or `.stl` meshes are present in the selected pipeline directory, they are loaded with the volumes. For the current pipeline this usually includes both `voxel_input_mesh.ply` and `mesh.ply`. If meshes are missing, the viewer still shows the available slices.
 
@@ -182,7 +205,14 @@ Additional `.ply`, `.obj`, or `.stl` meshes can be added with Add mesh. The mesh
 
 ## Remote Folders
 
-The Remote panel defaults to `/mnt/bn/vai3d-hl-1/Users/lizd/work/floodfill/output` on `hl_gpu_2` through the local backend. The SSH host field is editable, so any safe local SSH alias such as `126781` can be used. The backend uses the existing local SSH configuration and only reads files.
+The Remote panel defaults to the viewer server's local `temp_output` directory.
+Use source `local` to browse files on the machine running the viewer, or enter an
+allowed SSH alias such as `hl_gpu_2` or `126781`. Both paths are read-only.
+Local NPY volumes are memory-mapped on the server and transferred one visible
+slice at a time (about 1 MiB for a `513 x 513` slice). Local files are never
+written to the browser's persistent IndexedDB cache; PLY/OBJ/STL meshes still
+need to be transferred into browser memory for WebGL rendering. The folder cache
+button is disabled for `local` because those files are already on the server.
 
 1. Open Remote.
 2. Browse or enter a server path.

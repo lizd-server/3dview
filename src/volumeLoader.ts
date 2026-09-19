@@ -44,40 +44,7 @@ export function parseNpy(buffer: ArrayBuffer, name: string): VolumeData {
   const elementCount = header.shape.reduce((product, dimension) => product * dimension, 1);
   const warnings: string[] = [];
   const data = decodeData(buffer, header.dataOffset, header.descr, elementCount, warnings);
-  const baseName = name
-    .split("/")
-    .pop()
-    ?.replace(/\.npy$/i, "")
-    .toLowerCase() ?? name.toLowerCase();
-  let visualization: VolumeVisualization;
-
-  if (
-    /^000_initial_ccl_labels$/.test(baseName)
-    || /^\d{3}_final_ccl_labels$/.test(baseName)
-    || /^\d{3}_inside_filtered_labels$/.test(baseName)
-    || /^\d{3}_free_space_labels$/.test(baseName)
-    || /^\d{3}_final_labels$/.test(baseName)
-  ) {
-    visualization = "pipelineLabels";
-  } else if (/^\d{3}_(original|closed)_boundary$/.test(baseName)) {
-    visualization = "boundaryMask";
-  } else if (/^\d{3}_final_ccl_components$/.test(baseName)) {
-    visualization = "finalCclComponents";
-  } else if (/^\d{3}_pseudo_boundary_components$/.test(baseName)) {
-    visualization = "componentLabels";
-  } else if (/^\d{3}_final_ccl_cases$/.test(baseName)) {
-    visualization = "finalCclCases";
-  } else if (/^\d{3}_surface_boundary_classification$/.test(baseName)) {
-    visualization = "surfaceBoundaryClassification";
-  } else if (/^999_scalar_field$/.test(baseName)) {
-    visualization = "scalarField";
-  } else if (/^999_linf_distance_cases$/.test(baseName)) {
-    visualization = "linfinityDistanceCases";
-  } else {
-    throw new Error(
-      `${name} is not a supported pipeline debug volume. Expected pipeline debug .npy files such as 000_original_boundary.npy, 001_closed_boundary.npy, 002_free_space_labels.npy, 003_pseudo_boundary_components.npy, 004_final_labels.npy, 000_initial_ccl_labels.npy, NNN_final_ccl_labels.npy, NNN_final_ccl_components.npy, NNN_final_ccl_cases.npy, MMM_inside_filtered_labels.npy, SSS_surface_boundary_classification.npy, 999_scalar_field.npy, or 999_linf_distance_cases.npy.`,
-    );
-  }
+  const visualization = visualizationForNpyName(name);
 
   if (header.shape.length !== 3) {
     throw new Error(`Expected a 3D pipeline volume, got shape (${header.shape.join(", ")}).`);
@@ -93,6 +60,43 @@ export function parseNpy(buffer: ArrayBuffer, name: string): VolumeData {
     warnings,
     visualization,
   };
+}
+
+export function visualizationForNpyName(name: string): VolumeVisualization {
+  const baseName = name
+    .split("/")
+    .pop()
+    ?.replace(/\.npy$/i, "")
+    .toLowerCase() ?? name.toLowerCase();
+
+  if (
+    /^000_initial_ccl_labels$/.test(baseName)
+    || /^\d{3}_final_ccl_labels$/.test(baseName)
+    || /^\d{3}_inside_filtered_labels$/.test(baseName)
+    || /^\d{3}_free_space_labels$/.test(baseName)
+    || /^\d{3}_final_labels$/.test(baseName)
+    || /^\d{3}_labels_(before|after)_flood$/.test(baseName)
+  ) {
+    return "pipelineLabels";
+  } else if (/^\d{3}_(original|closed)_boundary$/.test(baseName)) {
+    return "boundaryMask";
+  } else if (/^\d{3}_final_ccl_components$/.test(baseName)) {
+    return "finalCclComponents";
+  } else if (/^\d{3}_pseudo_boundary_components$/.test(baseName)) {
+    return "componentLabels";
+  } else if (/^\d{3}_final_ccl_cases$/.test(baseName)) {
+    return "finalCclCases";
+  } else if (/^\d{3}_surface_boundary_classification$/.test(baseName)) {
+    return "surfaceBoundaryClassification";
+  } else if (/^999_scalar_field$/.test(baseName) || /^\d{3}_signed_distance$/.test(baseName)) {
+    return "scalarField";
+  } else if (/^999_linf_distance_cases$/.test(baseName)) {
+    return "linfinityDistanceCases";
+  }
+
+  throw new Error(
+    `${name} is not a supported pipeline debug volume. Expected pipeline debug .npy files such as 000_original_boundary.npy, 001_closed_boundary.npy, 002_free_space_labels.npy, 003_pseudo_boundary_components.npy, 004_final_labels.npy, 000_initial_ccl_labels.npy, NNN_final_ccl_labels.npy, NNN_final_ccl_components.npy, NNN_final_ccl_cases.npy, MMM_inside_filtered_labels.npy, SSS_surface_boundary_classification.npy, NNN_labels_before_flood.npy, NNN_labels_after_flood.npy, NNN_signed_distance.npy, 999_scalar_field.npy, or 999_linf_distance_cases.npy.`,
+  );
 }
 
 function parseHeader(headerText: string, dataOffset: number): NpyHeader {

@@ -33,14 +33,19 @@
             <summary class="toolbar-item" data-tool="remote">Remote</summary>
             <div id="remoteBrowser" class="remote-browser">
               <div class="remote-toolbar">
-                <input id="remoteHostInput" class="remote-host" type="text" value="hl_gpu_2" spellcheck="false" aria-label="SSH host" />
+                <input id="remoteHostInput" class="remote-host" type="text" value="local" list="remoteHostOptions" spellcheck="false" aria-label="File source" />
+                <datalist id="remoteHostOptions">
+                  <option value="local"></option>
+                  <option value="hl_gpu_2"></option>
+                  <option value="126781"></option>
+                </datalist>
                 <input id="remotePathInput" type="text" spellcheck="false" aria-label="Remote path" />
                 <button id="remoteGoButton" type="button">Go</button>
                 <button id="remoteUpButton" type="button">Up</button>
                 <button id="remoteRefreshButton" type="button">Refresh</button>
               </div>
               <div id="remoteStatus" class="remote-status">Remote backend not connected</div>
-              <section class="remote-cache" aria-label="Remote cache">
+              <section class="remote-cache hidden" aria-label="Remote cache">
                 <div class="remote-cache-head">
                   <div>
                     <span class="remote-cache-kicker">Cache</span>
@@ -58,7 +63,7 @@
               </section>
               <div id="remoteList" class="remote-list" aria-label="Remote directory"></div>
               <div class="remote-actions">
-                <button id="remoteDownloadButton" type="button">Download Folder</button>
+                <button id="remoteDownloadButton" type="button" disabled title="Local server files are read on demand and are not stored in the browser cache">On-demand</button>
                 <button id="remoteLoadButton" type="button">Load Folder</button>
               </div>
             </div>

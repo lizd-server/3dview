@@ -6,16 +6,18 @@
   "main": "electron/main.cjs",
   "scripts": {
     "dev": "node scripts/dev.mjs",
-    "dev:client": "vite --host 127.0.0.1",
+    "dev:client": "vite --host 0.0.0.0",
     "dev:server": "node server/remote-server.mjs",
-    "pm2:start": "pm2 start ecosystem.config.cjs",
+    "start": "node server/remote-server.mjs",
+    "deploy": "npm run build && npm start",
+    "pm2:start": "npm run build && pm2 start ecosystem.config.cjs",
     "pm2:stop": "pm2 delete ecosystem.config.cjs",
-    "pm2:logs": "pm2 logs voxel-viewer-backend voxel-viewer-vite",
+    "pm2:logs": "pm2 logs voxel-viewer-backend",
     "icon:mac": "swift scripts/create-app-icon.swift",
     "build": "tsc --noEmit && vite build",
     "mac:app": "node scripts/create-mac-app.mjs",
     "mac:register-vxz": "node scripts/register-vxz-default.mjs",
-    "preview": "vite preview --host 127.0.0.1"
+    "preview": "vite preview --host 0.0.0.0"
   },
   "dependencies": {
     "three": "^0.165.0"

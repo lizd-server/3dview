@@ -903,6 +903,17 @@ class MeshSliceViewer {
         actions.className = "remote-entry-actions";
         actions.append(loadButton);
         row.append(kind, size, actions);
+      } else if (entry.name.toLowerCase().endsWith(".npy")) {
+        const viewButton = document.createElement("button");
+        viewButton.type = "button";
+        viewButton.className = "remote-entry-action";
+        viewButton.textContent = "View";
+        viewButton.title = `View volume ${entry.path}`;
+        viewButton.addEventListener("click", () => void this.loadRemoteVolume(entry));
+        const actions = document.createElement("div");
+        actions.className = "remote-entry-actions";
+        actions.append(viewButton);
+        row.append(kind, size, actions);
       } else if (isMeshFileName(entry.name)) {
         const addButton = document.createElement("button");
         addButton.type = "button";
@@ -933,6 +944,50 @@ class MeshSliceViewer {
         { replace: false, normalizeToCurrentSize: this.normalizeImportedMesh.checked },
       );
       this.setRemoteStatus(`Added mesh ${entry.name}`);
+    } catch (error) {
+      if (!isAbortError(error)) {
+        this.setStatus(errorMessage(error));
+        this.setRemoteStatus(errorMessage(error));
+      }
+    }
+  }
+
+  private async loadRemoteVolume(entry: RemoteEntry): Promise<void> {
+    if (entry.type !== "file" || !entry.name.toLowerCase().endsWith(".npy")) {
+      return;
+    }
+
+    const host = this.currentRemoteHost();
+    const directoryPath = directoryName(entry.path);
+    const file = new RemoteFileHandle(host, entry.name, entry.path, directoryPath, entry.size, entry.mtimeMs);
+    const manifestEntry = this.remoteEntries.find((candidate) => (
+      candidate.type === "file"
+      && ["fields.json", "npy_labels.json"].includes(candidate.name.toLowerCase())
+    ));
+
+    try {
+      this.clearVxzSource();
+      this.clearServerVolumeSlice();
+      this.activeVolume = null;
+      this.volumeLoadToken += 1;
+      this.labelMetadataByFileName = manifestEntry
+        ? await loadNpyLabelManifest(new RemoteFileHandle(
+          host,
+          manifestEntry.name,
+          manifestEntry.path,
+          directoryPath,
+          manifestEntry.size,
+          manifestEntry.mtimeMs,
+        ))
+        : new Map();
+      this.volumeSlots = [{
+        name: entry.name,
+        file,
+        serverSource: file.supportsServerSlices() ? file : undefined,
+      }];
+      this.populateArraySelect();
+      await this.selectVolume(0, true);
+      this.setRemoteStatus(`Viewing ${entry.name}`);
     } catch (error) {
       if (!isAbortError(error)) {
         this.setStatus(errorMessage(error));

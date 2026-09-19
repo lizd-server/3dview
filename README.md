@@ -191,6 +191,27 @@ The viewer also loads earlier/later-stage and newer debug volumes when they are 
 - `NNN_labels_before_flood.npy`, `NNN_labels_after_flood.npy`, and
   `NNN_signed_distance.npy`, with their `fields.json` metadata manifest
 
+### `fields.json` manifest
+
+The viewer applies `defaults.axisOrder`, `defaults.association`, and the row-major
+4 x 4 `defaults.indexToWorld` matrix to every field. `axisOrder` describes which
+world axis corresponds to each NumPy array axis and defaults to `xyz`.
+
+Categorical entries under `fields` support `semantic`, `categoricalPreset`,
+`valueDescription`, and per-value `labels`. Each label may define `name`, `color`
+(CSS hex), `group`, `background`, and `hidden`. Hidden values remain available to
+the inspector and legend counts but are transparent in the 2D and 3D slices.
+
+Continuous entries support `validity.noDataValues`, `sparseDefault`, and
+`continuousStyle` with `range`, `center`, `scale`, `negativeColor`,
+`centerColor`, `positiveColor`, `outOfRangeColor`, and `isovalue`. No-data
+samples are transparent. Values within the range interpolate through the center
+color; values outside it use `outOfRangeColor`. `scale` is `linear` by default
+and may be `sqrt`.
+
+When a manifest or a particular display property is absent, the viewer retains
+the legacy filename-based pipeline colors and coordinate mapping.
+
 If `.ply`, `.obj`, or `.stl` meshes are present in the selected pipeline directory, they are loaded with the volumes. For the current pipeline this usually includes both `voxel_input_mesh.ply` and `mesh.ply`. If meshes are missing, the viewer still shows the available slices.
 
 The Array dropdown controls which loaded pipeline stage is shown. Volumes are loaded on demand, so switching stages does not keep every `r=512` array in browser memory at the same time.

@@ -21,6 +21,15 @@ import {
 import { normalizeObjectToPreferredBounds } from "./mesh-normalization";
 import { parseNpy, visualizationForNpyName } from "./volumeLoader";
 import {
+  dataAxisForWorldAxis,
+  labelDefinitionForValue,
+  manifestDisplayForValue,
+  parseVolumeManifest,
+  worldDimensionsForVolume,
+  worldPositionForGrid,
+  worldToDataGrid,
+} from "./volume-manifest";
+import {
   projectVxzDualVertexToSlice,
   vxzDualOverlayScale,
 } from "./vxz-dual-slice-projection";
@@ -155,6 +164,7 @@ interface ServerVolumeMetadata {
 interface ServerVolumeSlice {
   source: RemoteFileHandle;
   axis: SliceAxis;
+  dataAxis: 0 | 1 | 2;
   index: number;
   width: number;
   height: number;
@@ -359,7 +369,7 @@ class MeshSliceViewer {
   private lastDotCanvasSize = "";
 
   constructor() {
-    const sliceContext = this.sliceCanvas.getContext("2d", { alpha: false });
+    const sliceContext = this.sliceCanvas.getContext("2d", { alpha: true });
     if (!sliceContext) {
       throw new Error("Could not create a 2D canvas context.");
     }
@@ -971,6 +981,7 @@ class MeshSliceViewer {
     const file = new RemoteFileHandle(host, entry.name, entry.path, directoryPath, entry.size, entry.mtimeMs);
     const manifestEntry = this.remoteEntries.find((candidate) => (
       candidate.type === "file"
+      && directoryName(candidate.path) === directoryPath
       && ["fields.json", "npy_labels.json"].includes(candidate.name.toLowerCase())
     ));
 
@@ -2207,11 +2218,55 @@ class MeshSliceViewer {
 
   private updateSlicePlane(): void {
     const dims = this.hasSliceSource() ? this.getWorldDims() : [1, 1, 1] as [number, number, number];
+    if (this.activeVolume && !this.vxzMetadata) {
+      const centerGrid: [number, number, number] = [
+        (dims[0] - 1) / 2,
+        (dims[1] - 1) / 2,
+        (dims[2] - 1) / 2,
+      ];
+      centerGrid[axisToIndex(this.sliceAxis)] = this.sliceIndex;
+      const horizontalAxis = this.sliceAxis === "x" ? 2 : 0;
+      const verticalAxis = this.sliceAxis === "y" ? 2 : 1;
+      const horizontalStart = [...centerGrid] as [number, number, number];
+      const horizontalEnd = [...centerGrid] as [number, number, number];
+      const verticalStart = [...centerGrid] as [number, number, number];
+      const verticalEnd = [...centerGrid] as [number, number, number];
+      horizontalStart[horizontalAxis] = 0;
+      horizontalEnd[horizontalAxis] = dims[horizontalAxis] - 1;
+      verticalStart[verticalAxis] = 0;
+      verticalEnd[verticalAxis] = dims[verticalAxis] - 1;
+      const metadata = this.activeVolume.labelMetadata;
+      const center = new THREE.Vector3(...worldPositionForGrid(centerGrid, dims, metadata));
+      const horizontal = new THREE.Vector3(...worldPositionForGrid(horizontalEnd, dims, metadata))
+        .sub(new THREE.Vector3(...worldPositionForGrid(horizontalStart, dims, metadata)))
+        .multiplyScalar(0.5);
+      const vertical = new THREE.Vector3(...worldPositionForGrid(verticalEnd, dims, metadata))
+        .sub(new THREE.Vector3(...worldPositionForGrid(verticalStart, dims, metadata)))
+        .multiplyScalar(0.5);
+      const sliceStart = [...centerGrid] as [number, number, number];
+      const sliceEnd = [...centerGrid] as [number, number, number];
+      const sliceAxisIndex = axisToIndex(this.sliceAxis);
+      sliceStart[sliceAxisIndex] = 0;
+      sliceEnd[sliceAxisIndex] = dims[sliceAxisIndex] - 1;
+      const clippingNormal = new THREE.Vector3(...worldPositionForGrid(sliceStart, dims, metadata))
+        .sub(new THREE.Vector3(...worldPositionForGrid(sliceEnd, dims, metadata)))
+        .normalize();
+      const planeNormal = new THREE.Vector3().crossVectors(horizontal, vertical).normalize();
+
+      this.sliceRoot.matrixAutoUpdate = false;
+      this.sliceRoot.matrix.makeBasis(horizontal, vertical, planeNormal);
+      this.sliceRoot.matrix.setPosition(center);
+      this.sliceRoot.matrixWorldNeedsUpdate = true;
+      this.updateMeshClipping(0, clippingNormal, center);
+      return;
+    }
+
     const position = this.activeIndexToWorld(
       this.sliceIndex,
       dims[axisToIndex(this.sliceAxis)],
     );
 
+    this.sliceRoot.matrixAutoUpdate = true;
     this.sliceRoot.position.set(0, 0, 0);
     this.sliceRoot.rotation.set(0, 0, 0);
     const extentScale = this.vxzMetadata ? 0.5 : 1;
@@ -2230,7 +2285,7 @@ class MeshSliceViewer {
     this.updateMeshClipping(position);
   }
 
-  private updateMeshClipping(position = 0): void {
+  private updateMeshClipping(position = 0, customNormal?: THREE.Vector3, customPoint?: THREE.Vector3): void {
     if (!this.hasSliceSource()) {
       this.meshRoot.traverse((child) => {
         if (isMesh(child) && isMeshMaterial(child.material)) {
@@ -2242,14 +2297,19 @@ class MeshSliceViewer {
       return;
     }
 
-    if (this.sliceAxis === "x") {
+    if (customNormal && customPoint) {
+      this.meshClipPlane.normal.copy(customNormal);
+      this.meshClipPlane.constant = -customNormal.dot(customPoint);
+    } else if (this.sliceAxis === "x") {
       this.meshClipPlane.normal.set(-1, 0, 0);
     } else if (this.sliceAxis === "y") {
       this.meshClipPlane.normal.set(0, -1, 0);
     } else {
       this.meshClipPlane.normal.set(0, 0, -1);
     }
-    this.meshClipPlane.constant = position;
+    if (!customNormal || !customPoint) {
+      this.meshClipPlane.constant = position;
+    }
 
     this.meshRoot.traverse((child) => {
       if (isMesh(child) && isMeshMaterial(child.material)) {
@@ -2291,15 +2351,17 @@ class MeshSliceViewer {
     this.serverVolumeSliceAbort = controller;
     const axis = this.sliceAxis;
     const index = this.sliceIndex;
-    const [width, height] = axis === "x"
+    const dataAxis = dataAxisForWorldAxis(axis, volume.labelMetadata);
+    const dataAxisName = "xyz"[dataAxis] as SliceAxis;
+    const [width, height] = dataAxis === 0
       ? [volume.shape[2], volume.shape[1]]
-      : axis === "y"
+      : dataAxis === 1
         ? [volume.shape[0], volume.shape[2]]
         : [volume.shape[0], volume.shape[1]];
     this.setStatus(`Reading ${axis.toUpperCase()}=${index} from ${volume.name}`);
 
     try {
-      const buffer = await source.volumeSlice(axis, index, controller.signal);
+      const buffer = await source.volumeSlice(dataAxisName, index, controller.signal);
       if (token !== this.serverVolumeSliceToken) {
         return;
       }
@@ -2310,6 +2372,7 @@ class MeshSliceViewer {
       this.serverVolumeSlice = {
         source,
         axis,
+        dataAxis,
         index,
         width,
         height,
@@ -2373,12 +2436,12 @@ class MeshSliceViewer {
         compactImage.data[offset] = r;
         compactImage.data[offset + 1] = g;
         compactImage.data[offset + 2] = b;
-        compactImage.data[offset + 3] = 255;
+        compactImage.data[offset + 3] = display.alpha;
 
         if (display.category) {
           counts.set(display.category, (counts.get(display.category) ?? 0) + 1);
         }
-        if (volume.visualization === "linfinityDistanceCases" && Number.isFinite(sample.label)) {
+        if ((volume.labelMetadata?.labels || volume.visualization === "linfinityDistanceCases") && Number.isFinite(sample.label)) {
           const label = Math.trunc(sample.label);
           labelCounts.set(label, (labelCounts.get(label) ?? 0) + 1);
         }
@@ -2401,6 +2464,7 @@ class MeshSliceViewer {
           const r = compactImage.data[compactOffset];
           const g = compactImage.data[compactOffset + 1];
           const b = compactImage.data[compactOffset + 2];
+          const sourceAlpha = compactImage.data[compactOffset + 3] / 255;
           const centerX = px * DOT_SPACING;
           const centerY = py * DOT_SPACING;
 
@@ -2415,7 +2479,7 @@ class MeshSliceViewer {
             textureImage.data[offset] = r;
             textureImage.data[offset + 1] = g;
             textureImage.data[offset + 2] = b;
-            textureImage.data[offset + 3] = Math.round(255 * alpha);
+            textureImage.data[offset + 3] = Math.round(255 * alpha * sourceAlpha);
           }
         }
       }
@@ -2457,6 +2521,7 @@ class MeshSliceViewer {
           const r = compactImage.data[compactOffset];
           const g = compactImage.data[compactOffset + 1];
           const b = compactImage.data[compactOffset + 2];
+          const sourceAlpha = compactImage.data[compactOffset + 3] / 255;
           const centerX = DOT_MARGIN + px * DOT_SPACING;
           const centerY = DOT_MARGIN + py * DOT_SPACING;
 
@@ -2464,10 +2529,11 @@ class MeshSliceViewer {
             const x = centerX + dx;
             const y = centerY + dy;
             const offset = (y * canvasWidth + x) * 4;
-            const inverseAlpha = 1 - alpha;
-            image.data[offset] = Math.round(r * alpha + DOT_BACKGROUND[0] * inverseAlpha);
-            image.data[offset + 1] = Math.round(g * alpha + DOT_BACKGROUND[1] * inverseAlpha);
-            image.data[offset + 2] = Math.round(b * alpha + DOT_BACKGROUND[2] * inverseAlpha);
+            const effectiveAlpha = alpha * sourceAlpha;
+            const inverseAlpha = 1 - effectiveAlpha;
+            image.data[offset] = Math.round(r * effectiveAlpha + DOT_BACKGROUND[0] * inverseAlpha);
+            image.data[offset + 1] = Math.round(g * effectiveAlpha + DOT_BACKGROUND[1] * inverseAlpha);
+            image.data[offset + 2] = Math.round(b * effectiveAlpha + DOT_BACKGROUND[2] * inverseAlpha);
             image.data[offset + 3] = 255;
           }
         }
@@ -2748,11 +2814,16 @@ class MeshSliceViewer {
     this.legendList.replaceChildren();
 
     if (this.activeVolume?.visualization === "scalarField") {
+      const style = this.activeVolume.labelMetadata?.continuousStyle;
+      const range = style?.range ?? [-SCALAR_DISTANCE_BLACK_THRESHOLD, SCALAR_DISTANCE_BLACK_THRESHOLD];
+      const center = style?.center ?? 0;
+      const isovalue = style?.isovalue ?? this.activeVolume.labelMetadata?.isovalue ?? center;
       const items: Array<{ color: string; label: string; value: string }> = [
-        { color: "#ffffff", label: "Zero level", value: "0" },
-        { color: "#e60d0d", label: "Positive / outside", value: `0..${SCALAR_DISTANCE_BLACK_THRESHOLD}` },
-        { color: "#0d33f2", label: "Negative / inside", value: `-${SCALAR_DISTANCE_BLACK_THRESHOLD}..0` },
-        { color: "#000000", label: "Far field", value: `|v| > ${SCALAR_DISTANCE_BLACK_THRESHOLD}` },
+        { color: style?.centerColor ?? "#ffffff", label: "Center", value: String(center) },
+        ...(isovalue === center ? [] : [{ color: style?.centerColor ?? "#ffffff", label: "Isovalue", value: String(isovalue) }]),
+        { color: style?.positiveColor ?? "#e60d0d", label: "Positive / outside", value: `${center}..${range[1]}` },
+        { color: style?.negativeColor ?? "#0d33f2", label: "Negative / inside", value: `${range[0]}..${center}` },
+        { color: style?.outOfRangeColor ?? "#000000", label: "Out of range", value: `<${range[0]} or >${range[1]}` },
       ];
 
       for (const item of items) {
@@ -2770,6 +2841,32 @@ class MeshSliceViewer {
         value.textContent = item.value;
 
         row.append(swatch, label, value);
+        this.legendList.append(row);
+      }
+      return;
+    }
+
+    const manifestLabels = this.activeVolume?.labelMetadata?.labels;
+    if (manifestLabels) {
+      const visibleLabels = Array.from(labelCounts.entries()).sort((a, b) => a[0] - b[0]);
+      for (const [labelValue, countValue] of visibleLabels) {
+        const definition = manifestLabels[String(labelValue)];
+        const row = document.createElement("div");
+        row.className = "legend-row";
+
+        const swatch = document.createElement("span");
+        swatch.className = "swatch";
+        swatch.style.background = definition?.hidden ? "transparent" : definition?.color ?? "#7f7f7f";
+
+        const label = document.createElement("span");
+        label.className = "legend-label";
+        const labelText = definition?.name ?? `Label ${labelValue}`;
+        label.textContent = definition?.hidden ? `${labelText} (hidden)` : labelText;
+        label.title = this.activeVolume?.labelMetadata?.valueDescription ?? labelText;
+
+        const count = document.createElement("strong");
+        count.textContent = countValue.toLocaleString();
+        row.append(swatch, label, count);
         this.legendList.append(row);
       }
       return;
@@ -2868,20 +2965,27 @@ class MeshSliceViewer {
     }
 
     const grid = worldIndex;
+    const dataGrid = worldToDataGrid(worldIndex, volume.labelMetadata);
     const [nx, ny, nz] = volume.shape;
     const offset = volume.fortranOrder
-      ? grid[0] + nx * (grid[1] + ny * grid[2])
-      : grid[2] + nz * (grid[1] + ny * grid[0]);
+      ? dataGrid[0] + nx * (dataGrid[1] + ny * dataGrid[2])
+      : dataGrid[2] + nz * (dataGrid[1] + ny * dataGrid[0]);
     const serverSlice = this.serverVolumeSlice;
+    let serverOffset = -1;
+    if (serverSlice && this.serverSliceMatches(serverSlice.source)) {
+      if (serverSlice.dataAxis === 0) {
+        serverOffset = (ny - 1 - dataGrid[1]) * serverSlice.width + dataGrid[2];
+      } else if (serverSlice.dataAxis === 1) {
+        serverOffset = (nz - 1 - dataGrid[2]) * serverSlice.width + dataGrid[0];
+      } else {
+        serverOffset = (ny - 1 - dataGrid[1]) * serverSlice.width + dataGrid[0];
+      }
+    }
     const label = serverSlice && this.serverSliceMatches(serverSlice.source)
-      ? Number(serverSlice.data[py * serverSlice.width + px])
+      ? Number(serverSlice.data[serverOffset])
       : Number(volume.data[offset]);
     const { category } = this.getSampleDisplay({ grid, worldIndex, world: new THREE.Vector3(), label, category: null });
-    const world = new THREE.Vector3(
-      indexToWorld(worldIndex[0], dims[0]),
-      indexToWorld(worldIndex[1], dims[1]),
-      indexToWorld(worldIndex[2], dims[2]),
-    );
+    const world = new THREE.Vector3(...worldPositionForGrid(worldIndex, dims, volume.labelMetadata));
 
     return { grid, worldIndex, world, label, category };
   }
@@ -2889,16 +2993,19 @@ class MeshSliceViewer {
   private getSampleDisplay(sample: SliceSample): {
     category: CategoryKey | null;
     color: [number, number, number];
+    alpha: number;
   } {
     const volume = this.activeVolume;
     if (!volume) {
-      return { category: null, color: [127, 127, 127] };
+      return { category: null, color: [127, 127, 127], alpha: 255 };
     }
 
     const category = classifyVolumeLabel(sample.label, volume.visualization);
+    const manifestDisplay = manifestDisplayForValue(volume.labelMetadata, sample.label);
     return {
       category,
-      color: colorForLabel(sample.label, category, volume.visualization),
+      color: manifestDisplay?.color ?? colorForLabel(sample.label, category, volume.visualization),
+      alpha: manifestDisplay?.alpha ?? 255,
     };
   }
 
@@ -2911,8 +3018,7 @@ class MeshSliceViewer {
       return [1, 1, 1];
     }
 
-    const [nx, ny, nz] = this.activeVolume.shape;
-    return [nx, ny, nz];
+    return worldDimensionsForVolume(this.activeVolume.shape, this.activeVolume.labelMetadata);
   }
 
   private hasSliceSource(): boolean {
@@ -2972,24 +3078,36 @@ class MeshSliceViewer {
 
     if (this.activeVolume.visualization === "scalarField") {
       const value = Number.isFinite(sample.label) ? sample.label.toFixed(6) : String(sample.label);
-      const side = !Number.isFinite(sample.label)
-        ? "-"
-        : Math.abs(sample.label) > SCALAR_DISTANCE_BLACK_THRESHOLD
-          ? "far field"
-          : sample.label >= 0
+      const metadata = this.activeVolume.labelMetadata;
+      const display = manifestDisplayForValue(metadata, sample.label);
+      const isovalue = metadata?.continuousStyle?.isovalue ?? metadata?.isovalue ?? metadata?.continuousStyle?.center ?? 0;
+      const side = display?.noData
+        ? "no data"
+        : display?.outOfRange
+          ? "out of range"
+          : !Number.isFinite(sample.label)
+            ? "-"
+            : sample.label >= isovalue
             ? "positive / outside"
             : "negative / inside";
-      this.setInspector({
+      const values: Record<string, string> = {
         Grid: `[${sample.grid.join(", ")}]`,
         World: `[${sample.world.x.toFixed(4)}, ${sample.world.y.toFixed(4)}, ${sample.world.z.toFixed(4)}]`,
         Value: value,
         Side: side,
-      });
+      };
+      if (metadata?.valueDescription) {
+        values.Description = metadata.valueDescription;
+      }
+      this.setInspector(values);
       return;
     }
 
     const label = Number.isInteger(sample.label) ? String(sample.label) : sample.label.toFixed(4);
-    const labelText = this.activeVolume.visualization === "finalCclComponents" && sample.label > 3
+    const definition = labelDefinitionForValue(this.activeVolume.labelMetadata, sample.label);
+    const labelText = definition?.name
+      ? `${label} ${definition.name}`
+      : this.activeVolume.visualization === "finalCclComponents" && sample.label > 3
       ? `component ${Number.isInteger(sample.label - 3) ? String(sample.label - 3) : (sample.label - 3).toFixed(4)}`
       : this.activeVolume.visualization === "finalCclCases" && sample.category
         ? `${label} ${categoryDisplayName(sample.category)}`
@@ -3000,8 +3118,11 @@ class MeshSliceViewer {
       Grid: `[${sample.grid.join(", ")}]`,
       World: `[${sample.world.x.toFixed(4)}, ${sample.world.y.toFixed(4)}, ${sample.world.z.toFixed(4)}]`,
       Label: labelText,
-      Category: sample.category ? categoryDisplayName(sample.category) : "-",
+      Category: definition?.group ?? (sample.category ? categoryDisplayName(sample.category) : "-"),
     };
+    if (this.activeVolume.labelMetadata?.valueDescription) {
+      values.Description = this.activeVolume.labelMetadata.valueDescription;
+    }
 
     this.setInspector(values);
   }
@@ -3058,7 +3179,9 @@ class MeshSliceViewer {
     }
 
     const key = String(Math.trunc(value));
-    return this.activeVolume.labelMetadata?.labels?.[key] ?? fallback;
+    return this.activeVolume.labelMetadata?.labels?.[key]?.name
+      ?? this.activeVolume.labelMetadata?.dynamicLabels?.[key]?.name
+      ?? fallback;
   }
 
   private setInspector(values?: Record<string, string>): void {
@@ -3763,79 +3886,11 @@ async function loadNpyLabelManifest(file?: SourceFile): Promise<Map<string, Volu
   if (!file) {
     return new Map();
   }
-
   try {
-    const manifest = JSON.parse(await file.text()) as {
-      files?: Record<string, {
-        kind?: unknown;
-        labels?: unknown;
-        dynamic_labels?: unknown;
-        value_description?: unknown;
-        isovalue?: unknown;
-      }>;
-      fields?: Record<string, {
-        semantic?: unknown;
-        labels?: unknown;
-        valueDescription?: unknown;
-        continuousStyle?: { isovalue?: unknown };
-      }>;
-    };
-    const result = new Map<string, VolumeLabelMetadata>();
-
-    for (const [name, metadata] of Object.entries(manifest.files ?? {})) {
-      result.set(baseFileName(name), {
-        kind: typeof metadata.kind === "string" ? metadata.kind : undefined,
-        labels: stringRecord(metadata.labels),
-        dynamicLabels: stringRecord(metadata.dynamic_labels),
-        valueDescription: typeof metadata.value_description === "string" ? metadata.value_description : undefined,
-        isovalue: typeof metadata.isovalue === "number" ? metadata.isovalue : undefined,
-      });
-    }
-    for (const [name, metadata] of Object.entries(manifest.fields ?? {})) {
-      result.set(baseFileName(name), {
-        kind: typeof metadata.semantic === "string" ? metadata.semantic : undefined,
-        labels: fieldLabelRecord(metadata.labels),
-        valueDescription: typeof metadata.valueDescription === "string" ? metadata.valueDescription : undefined,
-        isovalue: typeof metadata.continuousStyle?.isovalue === "number"
-          ? metadata.continuousStyle.isovalue
-          : undefined,
-      });
-    }
-
-    return result;
-  } catch {
-    return new Map();
+    return parseVolumeManifest(JSON.parse(await file.text()));
+  } catch (error) {
+    throw new Error(`Could not parse ${file.name}: ${errorMessage(error)}`);
   }
-}
-
-function fieldLabelRecord(value: unknown): Record<string, string> | undefined {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return undefined;
-  }
-
-  const entries = Object.entries(value).flatMap(([key, definition]) => {
-    if (typeof definition === "string") {
-      return [[key, definition] as [string, string]];
-    }
-    if (definition && typeof definition === "object" && !Array.isArray(definition)) {
-      const name = (definition as { name?: unknown }).name;
-      if (typeof name === "string") {
-        return [[key, name] as [string, string]];
-      }
-    }
-    return [];
-  });
-  return entries.length > 0 ? Object.fromEntries(entries) : undefined;
-}
-
-function stringRecord(value: unknown): Record<string, string> | undefined {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return undefined;
-  }
-
-  const entries = Object.entries(value)
-    .filter((entry): entry is [string, string] => typeof entry[1] === "string");
-  return entries.length > 0 ? Object.fromEntries(entries) : undefined;
 }
 
 function baseFileName(name: string): string {

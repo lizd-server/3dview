@@ -47,12 +47,43 @@ export interface VolumeData {
   labelMetadata?: VolumeLabelMetadata;
 }
 
+export interface VolumeLabelDefinition {
+  name?: string;
+  color?: string;
+  group?: string;
+  background?: boolean;
+  hidden?: boolean;
+}
+
+export interface VolumeContinuousStyle {
+  range?: [number, number];
+  center?: number;
+  scale?: string;
+  negativeColor?: string;
+  centerColor?: string;
+  positiveColor?: string;
+  outOfRangeColor?: string;
+  isovalue?: number;
+}
+
+export interface VolumeValidity {
+  noDataValues?: Array<number | string>;
+  description?: string;
+}
+
 export interface VolumeLabelMetadata {
   kind?: string;
-  labels?: Record<string, string>;
-  dynamicLabels?: Record<string, string>;
+  categoricalPreset?: string;
+  labels?: Record<string, VolumeLabelDefinition>;
+  dynamicLabels?: Record<string, VolumeLabelDefinition>;
   valueDescription?: string;
   isovalue?: number;
+  validity?: VolumeValidity;
+  sparseDefault?: number | string;
+  continuousStyle?: VolumeContinuousStyle;
+  axisOrder?: string;
+  association?: string;
+  indexToWorld?: number[];
 }
 
 export interface VxzMetadata {

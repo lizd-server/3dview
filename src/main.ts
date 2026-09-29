@@ -284,6 +284,7 @@ class MeshSliceViewer {
   private readonly remoteCacheUsage = getElement<HTMLElement>("remoteCacheUsage");
   private readonly remoteCacheDetails = getElement<HTMLElement>("remoteCacheDetails");
   private readonly remoteDownloadButton = getElement<HTMLButtonElement>("remoteDownloadButton");
+  private readonly remoteStorageStatus = getElement<HTMLElement>("remoteStorageStatus");
   private readonly loadProgress = getElement<HTMLElement>("loadProgress");
   private readonly arraySelect = getElement<HTMLSelectElement>("arraySelect");
   private readonly arraySelectRow = getElement<HTMLElement>("arraySelectRow");
@@ -1024,11 +1025,12 @@ class MeshSliceViewer {
   private updateRemoteDownloadButton(host: string): void {
     const onDemand = host === "local";
     this.remoteCachePanel?.classList.toggle("hidden", onDemand);
-    this.remoteDownloadButton.disabled = onDemand;
-    this.remoteDownloadButton.textContent = onDemand ? "On-demand" : "Cache Folder";
-    this.remoteDownloadButton.title = onDemand
-      ? "Local server files are read on demand and are not stored in the browser cache"
-      : "Cache recognized files in browser storage";
+    this.remoteBrowser.classList.toggle("local-source", onDemand);
+    this.remoteStorageStatus.classList.toggle("hidden", !onDemand);
+    this.remoteDownloadButton.classList.toggle("hidden", onDemand);
+    this.remoteDownloadButton.disabled = false;
+    this.remoteDownloadButton.textContent = "Cache Folder";
+    this.remoteDownloadButton.title = "Cache recognized files in browser storage";
   }
 
   private currentRemoteHost(): string {

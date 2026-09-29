@@ -63,7 +63,8 @@
               </section>
               <div id="remoteList" class="remote-list" aria-label="Remote directory"></div>
               <div class="remote-actions">
-                <button id="remoteDownloadButton" type="button" disabled title="Local server files are read on demand and are not stored in the browser cache">On-demand</button>
+                <span id="remoteStorageStatus" class="remote-storage-status" title="Local files are read directly and are not stored in the browser cache">Local · no browser cache</span>
+                <button id="remoteDownloadButton" type="button" class="hidden">Cache Folder</button>
                 <button id="remoteLoadButton" type="button">Load Folder</button>
               </div>
             </div>
